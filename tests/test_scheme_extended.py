@@ -3,11 +3,15 @@
 Extended tests for the Scheme interpreter - achieving comprehensive coverage.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pytest
 import sys
 import io
-import dagshell
-from scheme_interpreter import (
+import dagshell.dagshell as dagshell
+from dagshell.scheme_interpreter import (
     tokenize, parse, Symbol, evaluate, Environment, Procedure,
     create_global_env, SchemeREPL,
     _append_file, _is_file, _is_directory, _stat_to_list, _get_hash,
@@ -648,7 +652,7 @@ class TestMainFunction:
         sys.stdout = captured = io.StringIO()
 
         try:
-            from scheme_interpreter import main
+            from dagshell.scheme_interpreter import main
 
             # Should not raise SystemExit for valid script
             main()
@@ -671,7 +675,7 @@ class TestMainFunction:
         sys.stdout = sys.stderr = captured = io.StringIO()
 
         try:
-            from scheme_interpreter import main
+            from dagshell.scheme_interpreter import main
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
@@ -694,7 +698,7 @@ class TestMainFunction:
         sys.stdout = sys.stderr = captured = io.StringIO()
 
         try:
-            from scheme_interpreter import main
+            from dagshell.scheme_interpreter import main
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1

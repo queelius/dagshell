@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Demo of DagShell terminal with persistence."""
 
-from terminal import TerminalSession
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dagshell.terminal import TerminalSession
 import os
 
 def main():

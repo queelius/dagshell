@@ -6,10 +6,14 @@ Tests the composable, chainable interface that serves as the foundation
 for terminal emulation.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pytest
-import dagshell
-from dagshell_fluent import DagShell, CommandResult, shell, _shell
-import dagshell_fluent as ds
+import dagshell.dagshell as dagshell
+from dagshell.dagshell_fluent import DagShell, CommandResult, shell, _shell
+import dagshell.dagshell_fluent as ds
 
 
 class TestCommandResult:
@@ -464,7 +468,7 @@ class TestModuleLevelFunctions:
         """Reset global shell."""
         # Reset both the global filesystem and the shell
         dagshell._default_fs = None
-        import dagshell_fluent
+        import dagshell.dagshell_fluent as dagshell_fluent
         dagshell_fluent._shell = DagShell()
         ds.shell.mkdir('/test')
         ds.shell.fs.write('/test/file.txt', 'test content')

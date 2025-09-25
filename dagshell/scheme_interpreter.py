@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from functools import reduce
 import operator
 
-import dagshell
+from . import dagshell
 
 
 @dataclass

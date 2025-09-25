@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Test user permissions and export functionality."""
 
-from terminal import TerminalSession, TerminalConfig
-from dagshell_fluent import DagShell
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dagshell.terminal import TerminalSession, TerminalConfig
+from dagshell.dagshell_fluent import DagShell
 import os
 import tempfile
 import shutil
@@ -124,7 +128,7 @@ def test_permission_checking():
     print("Testing Permission Checking")
     print("=" * 60)
 
-    from dagshell import FileSystem, Mode
+    from dagshell.dagshell import FileSystem, Mode
 
     fs = FileSystem()
 
@@ -136,7 +140,7 @@ def test_permission_checking():
     node_hash = fs._resolve_path("/private.txt")
     node = fs.nodes[node_hash]
     # Create new node with restricted permissions (owner read/write only)
-    import dagshell
+    import dagshell.dagshell as dagshell
     new_node = dagshell.FileNode(
         content=node.content,
         mode=Mode.IFREG | Mode.IRUSR | Mode.IWUSR,  # 0o600

@@ -3,12 +3,16 @@
 Extended unit tests for dagshell - achieving comprehensive coverage.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pytest
 import json
 import base64
 import time
-import dagshell
-from dagshell import FileSystem, FileNode, DirNode, DeviceNode, Mode, FileHandle
+import dagshell.dagshell as dagshell
+from dagshell.dagshell import FileSystem, FileNode, DirNode, DeviceNode, Mode, FileHandle
 
 
 class TestFileNodeExtended:

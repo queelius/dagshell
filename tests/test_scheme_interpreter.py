@@ -3,9 +3,13 @@
 Test suite for the Scheme interpreter.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pytest
-import dagshell
-from scheme_interpreter import (
+import dagshell.dagshell as dagshell
+from dagshell.scheme_interpreter import (
     tokenize, parse, Symbol, evaluate, Environment,
     create_global_env, SchemeREPL, Procedure
 )

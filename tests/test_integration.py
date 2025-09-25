@@ -3,12 +3,16 @@
 Integration tests for dagshell - testing Scheme DSL with filesystem operations.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pytest
 import json
 import tempfile
 import os
-import dagshell
-from scheme_interpreter import SchemeREPL
+import dagshell.dagshell as dagshell
+from dagshell.scheme_interpreter import SchemeREPL
 
 
 class TestSchemeFilesystemIntegration:

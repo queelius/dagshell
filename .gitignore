@@ -41,14 +41,28 @@ htmlcov/
 .tox/
 *.cover
 .hypothesis/
+.benchmarks/
 
-# DagShell specific
+# DagShell specific data files
 *.json
 !package.json
 !tsconfig.json
+!pyproject.toml
 dagshell-log.txt
 treeshell-log.txt
+*-log.txt
 *.log
+*.dat
+*.db
+*.sqlite
+*.pickle
+*.pkl
+
+# DagShell workspace/filesystem files
+my_filesystem.json
+my_workspace.json
+test_filesystem.json
+demo_filesystem.json
 
 # Temporary files
 *.tmp

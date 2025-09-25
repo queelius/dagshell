@@ -3,10 +3,14 @@
 Unit tests for dagshell - content-addressable virtual filesystem.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pytest
 import json
-import dagshell
-from dagshell import FileSystem, FileNode, DirNode, DeviceNode, Mode
+import dagshell.dagshell as dagshell
+from dagshell.dagshell import FileSystem, FileNode, DirNode, DeviceNode, Mode
 
 
 class TestNodes:

@@ -21,11 +21,11 @@ from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from command_parser import (
+from .command_parser import (
     CommandParser, Command, Pipeline, CommandGroup,
     RedirectType, Redirect
 )
-from dagshell_fluent import DagShell, CommandResult
+from .dagshell_fluent import DagShell, CommandResult
 
 
 @dataclass

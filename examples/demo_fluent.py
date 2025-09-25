@@ -5,8 +5,12 @@ Demo of the dagshell fluent API - showcasing elegant, composable operations.
 This demonstrates how the fluent API serves as the foundation for terminal emulation.
 """
 
-from dagshell_fluent import DagShell, shell
-import dagshell_fluent as ds
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dagshell.dagshell_fluent import DagShell, shell
+import dagshell.dagshell_fluent as ds
 
 def demo_basic_operations():
     """Demonstrate basic shell operations."""

@@ -5,8 +5,12 @@ Interactive test script for the terminal emulator.
 This script allows manual testing of the terminal emulator functionality.
 """
 
-from terminal import TerminalSession, TerminalConfig
-from dagshell_fluent import DagShell
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from dagshell.terminal import TerminalSession, TerminalConfig
+from dagshell.dagshell_fluent import DagShell
 
 
 def test_commands():

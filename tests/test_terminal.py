@@ -6,19 +6,23 @@ This module provides comprehensive tests for the command parser,
 executor, and terminal session components.
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 
-from command_parser import (
+from dagshell.command_parser import (
     CommandParser, Command, Pipeline, CommandGroup,
     RedirectType, Redirect
 )
-from terminal import (
+from dagshell.terminal import (
     TerminalSession, CommandExecutor, CommandHistory,
     TerminalConfig
 )
-from dagshell_fluent import DagShell, CommandResult
-import dagshell
+from dagshell.dagshell_fluent import DagShell, CommandResult
+import dagshell.dagshell as dagshell
 
 
 class TestCommandParser(unittest.TestCase):

@@ -6,9 +6,13 @@ This script demonstrates the key features of the terminal emulator,
 showing how shell commands are translated into fluent API calls.
 """
 
-import dagshell
-from terminal import TerminalSession, TerminalConfig
-from dagshell_fluent import DagShell
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import dagshell.dagshell as dagshell
+from dagshell.terminal import TerminalSession, TerminalConfig
+from dagshell.dagshell_fluent import DagShell
 
 
 def setup_demo_environment():

@@ -9,8 +9,12 @@ This demonstrates:
 4. Python API for programmatic access
 """
 
-import dagshell
-from scheme_interpreter import SchemeREPL
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import dagshell.dagshell as dagshell
+from dagshell.scheme_interpreter import SchemeREPL
 
 
 def demo_python_api():
@@ -250,7 +254,7 @@ def main():
     print("  python scheme_interpreter.py")
     print()
     print("To use the Python API directly:")
-    print("  import dagshell")
+    print("  import dagshell.dagshell as dagshell")
     print("  fs = dagshell.FileSystem()")
 
 

@@ -19,7 +19,7 @@ import fnmatch
 from typing import List, Dict, Optional, Union, Any, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-import dagshell
+from . import dagshell
 
 
 @dataclass
