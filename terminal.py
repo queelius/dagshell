@@ -96,6 +96,7 @@ class CommandExecutor:
 
     def _execute_command(self, command: Command) -> CommandResult:
         """Execute a single command by calling the appropriate shell method."""
+
         # Map command name to shell method
         method = self._get_shell_method(command.name)
 
@@ -134,6 +135,7 @@ class CommandExecutor:
                 exit_code=1
             )
 
+
     def _show_help(self) -> CommandResult:
         """Show help information."""
         help_text = """DagShell Terminal Emulator - Help
@@ -169,6 +171,13 @@ PERSISTENCE:
   save [file]       Save filesystem to JSON (default: dagshell.json)
   load [file]       Load filesystem from JSON
   commit            Alias for save
+  export <path>     Export virtual filesystem to real filesystem
+
+USER MANAGEMENT:
+  whoami            Show current username
+  su [user]         Switch to another user (default: root)
+  cat /etc/passwd   View user accounts
+  cat /etc/group    View groups
 
 SYSTEM:
   env [var]         Show environment variable(s)
@@ -201,6 +210,9 @@ Use 'save' to persist changes to disk as JSON."""
             'quit': lambda: CommandResult(data='', text='exit', exit_code=0),
             'help': lambda: self._show_help(),
             '?': lambda: self._show_help(),
+            'whoami': lambda: self._whoami(),
+            'su': lambda *args: self._su(args[0] if args else 'root'),
+            'export': lambda *args: self._export(args[0] if args else 'export'),
         }
 
         return aliases.get(command_name)
@@ -401,6 +413,12 @@ class TerminalSession:
         self.history = CommandHistory(self.config.history_size)
         self.running = False
 
+        # User context
+        self.current_user = self.config.user
+        self.uid, self.gid = self.shell.fs.lookup_user(self.current_user)
+        self.groups = self.shell.fs.get_user_groups(self.current_user)
+        self.strict_permissions = False  # Can be enabled for permission checking
+
         # Initialize shell environment
         self._init_environment()
 
@@ -413,6 +431,45 @@ class TerminalSession:
         # Set initial directory
         if self.config.initial_dir:
             self.shell.cd(self.config.initial_dir)
+
+    def _whoami(self) -> CommandResult:
+        """Return current username."""
+        return CommandResult(data=self.current_user, text=self.current_user, exit_code=0)
+
+    def _su(self, username: str) -> CommandResult:
+        """Switch user."""
+        # Check if user exists
+        uid, gid = self.shell.fs.lookup_user(username)
+        if uid == 1000 and username not in ['user', 'alice', 'bob', 'root']:
+            return CommandResult(
+                data='',
+                text=f"su: user '{username}' does not exist",
+                exit_code=1
+            )
+
+        # Switch user
+        self.current_user = username
+        self.uid, self.gid = uid, gid
+        self.groups = self.shell.fs.get_user_groups(username)
+        self.shell.setenv('USER', username)
+
+        # Change to user's home directory
+        home = f"/home/{username}" if username != 'root' else "/root"
+        if self.shell.fs.exists(home):
+            self.shell.cd(home)
+            self.shell.setenv('HOME', home)
+
+        return CommandResult(data='', text='', exit_code=0)
+
+    def _export(self, target_path: str) -> CommandResult:
+        """Export virtual filesystem to real filesystem."""
+        try:
+            exported = self.shell.fs.export_to_real(target_path)
+            result = f"Exported {exported} files/directories to {target_path}"
+            return CommandResult(data=exported, text=result, exit_code=0)
+        except Exception as e:
+            error = f"Export failed: {e}"
+            return CommandResult(data='', text=error, exit_code=1)
 
     def get_prompt(self) -> str:
         """Generate the command prompt."""
@@ -428,7 +485,7 @@ class TerminalSession:
 
         # Format prompt
         prompt = self.config.prompt_format.format(
-            user=self.config.user,
+            user=self.current_user,
             hostname=self.config.hostname,
             cwd=display_cwd,
             time=datetime.now().strftime('%H:%M:%S')
@@ -454,13 +511,28 @@ class TerminalSession:
         # Parse the command
         command_group = self.parser.parse(command_line)
 
-        # Check for exit commands
+        # Check for special commands
         if command_group.pipelines and command_group.pipelines[0][0].commands:
             first_cmd = command_group.pipelines[0][0].commands[0]
+
+            # Handle exit
             if first_cmd.name in ['exit', 'quit']:
                 return None
 
-        # Execute the command
+            # Handle user management commands specially
+            if first_cmd.name == 'whoami':
+                return self.current_user
+            elif first_cmd.name == 'su':
+                username = first_cmd.args[0] if first_cmd.args else 'root'
+                result = self._su(username)
+                return result.text if result.text else ''
+            elif first_cmd.name == 'export':
+                if not first_cmd.args:
+                    return 'export: missing target path'
+                result = self._export(first_cmd.args[0])
+                return result.text
+
+        # Execute the command normally
         result = self.executor.execute(command_group)
 
         # Return the text output

@@ -197,6 +197,34 @@ class FileSystem:
         root_hash = self._add_node(root)
         self.paths['/'] = root_hash
 
+        # Create /etc with user/group files
+        etc = DirNode()
+
+        # Create /etc/passwd
+        passwd_content = b"""root:x:0:0:root:/root:/bin/sh
+user:x:1000:1000:Default User:/home/user:/bin/sh
+alice:x:1001:1001:Alice:/home/alice:/bin/sh
+bob:x:1002:1002:Bob:/home/bob:/bin/sh"""
+        passwd_node = FileNode(passwd_content, mode=Mode.FILE_DEFAULT)
+        passwd_hash = self._add_node(passwd_node)
+        etc = etc.with_child('passwd', passwd_hash)
+
+        # Create /etc/group
+        group_content = b"""root:x:0:
+user:x:1000:
+alice:x:1001:
+bob:x:1002:
+developers:x:2000:alice,bob"""
+        group_node = FileNode(group_content, mode=Mode.FILE_DEFAULT)
+        group_hash = self._add_node(group_node)
+        etc = etc.with_child('group', group_hash)
+
+        etc_hash = self._add_node(etc)
+        root = root.with_child('etc', etc_hash)
+        self.paths['/etc'] = etc_hash
+        self.paths['/etc/passwd'] = passwd_hash
+        self.paths['/etc/group'] = group_hash
+
         # Create /dev with devices
         dev = DirNode()
         dev_hash = self._add_node(dev)
@@ -210,7 +238,7 @@ class FileSystem:
         # Update dev directory with devices
         dev_hash = self._add_node(dev)
 
-        # Update root with dev
+        # Update root with dev and etc
         root = root.with_child('dev', dev_hash)
         root_hash = self._add_node(root)
         self.paths['/'] = root_hash
@@ -444,6 +472,186 @@ class FileSystem:
         self.deleted.discard(path)
 
         return FileHandle(self, path, file_node, mode)
+
+    # User and permission management
+
+    def lookup_user(self, username: str) -> tuple[int, int]:
+        """Look up user ID and primary group ID from /etc/passwd."""
+        passwd_hash = self._resolve_path('/etc/passwd')
+        if not passwd_hash:
+            # Default if no passwd file
+            return (1000, 1000) if username == 'user' else (0, 0)
+
+        passwd_node = self.nodes[passwd_hash]
+        content = passwd_node.content.decode('utf-8')
+
+        for line in content.strip().split('\n'):
+            parts = line.split(':')
+            if parts[0] == username:
+                return (int(parts[2]), int(parts[3]))
+
+        # Default for unknown users
+        return (1000, 1000)
+
+    def get_user_groups(self, username: str) -> Set[int]:
+        """Get all group IDs for a user from /etc/group."""
+        uid, primary_gid = self.lookup_user(username)
+        groups = {primary_gid}
+
+        group_hash = self._resolve_path('/etc/group')
+        if not group_hash:
+            return groups
+
+        group_node = self.nodes[group_hash]
+        content = group_node.content.decode('utf-8')
+
+        for line in content.strip().split('\n'):
+            parts = line.split(':')
+            if len(parts) >= 4:
+                gid = int(parts[2])
+                members = parts[3].split(',') if parts[3] else []
+                if username in members:
+                    groups.add(gid)
+
+        return groups
+
+    def check_permission(self, path: str, uid: int, gids: Set[int], permission: int) -> bool:
+        """
+        Check if user has specific permission for a path.
+
+        Args:
+            path: File/directory path
+            uid: User ID
+            gids: Set of group IDs the user belongs to
+            permission: Permission bit to check (e.g., Mode.IRUSR, Mode.IWUSR)
+
+        Returns:
+            True if permission granted, False otherwise
+        """
+        node_hash = self._resolve_path(path)
+        if not node_hash:
+            return False
+
+        node = self.nodes[node_hash]
+        mode = node.mode
+
+        # Root user (uid 0) has all permissions
+        if uid == 0:
+            return True
+
+        # Owner permissions
+        if uid == node.uid:
+            if permission in [Mode.IRUSR, Mode.IRGRP, Mode.IROTH]:
+                return bool(mode & Mode.IRUSR)
+            elif permission in [Mode.IWUSR, Mode.IWGRP, Mode.IWOTH]:
+                return bool(mode & Mode.IWUSR)
+            elif permission in [Mode.IXUSR, Mode.IXGRP, Mode.IXOTH]:
+                return bool(mode & Mode.IXUSR)
+
+        # Group permissions
+        if node.gid in gids:
+            if permission in [Mode.IRUSR, Mode.IRGRP, Mode.IROTH]:
+                return bool(mode & Mode.IRGRP)
+            elif permission in [Mode.IWUSR, Mode.IWGRP, Mode.IWOTH]:
+                return bool(mode & Mode.IWGRP)
+            elif permission in [Mode.IXUSR, Mode.IXGRP, Mode.IXOTH]:
+                return bool(mode & Mode.IXGRP)
+
+        # Other permissions
+        if permission in [Mode.IRUSR, Mode.IRGRP, Mode.IROTH]:
+            return bool(mode & Mode.IROTH)
+        elif permission in [Mode.IWUSR, Mode.IWGRP, Mode.IWOTH]:
+            return bool(mode & Mode.IWOTH)
+        elif permission in [Mode.IXUSR, Mode.IXGRP, Mode.IXOTH]:
+            return bool(mode & Mode.IXOTH)
+
+        return False
+
+    def export_to_real(self, target_path: str, preserve_permissions: bool = True,
+                      uid_map: Optional[Dict[int, int]] = None,
+                      gid_map: Optional[Dict[int, int]] = None) -> int:
+        """
+        Export the virtual filesystem to a real filesystem.
+
+        Args:
+            target_path: Target directory for export
+            preserve_permissions: Whether to preserve file modes
+            uid_map: Mapping from virtual UIDs to real UIDs
+            gid_map: Mapping from virtual GIDs to real GIDs
+
+        Returns:
+            Number of files/directories exported
+        """
+        import shutil
+
+        # Default mappings (virtual -> real)
+        if uid_map is None:
+            uid_map = {0: 0, 1000: os.getuid(), 1001: os.getuid(), 1002: os.getuid()}
+        if gid_map is None:
+            gid_map = {0: 0, 1000: os.getgid(), 1001: os.getgid(), 1002: os.getgid()}
+
+        # Create target directory if needed
+        os.makedirs(target_path, exist_ok=True)
+
+        exported = 0
+
+        # Export all paths
+        for vpath in sorted(self.paths.keys()):
+            if vpath in self.deleted:
+                continue
+
+            node_hash = self.paths[vpath]
+            node = self.nodes[node_hash]
+
+            # Skip root directory itself
+            if vpath == '/':
+                continue
+
+            # Calculate real path
+            real_path = os.path.join(target_path, vpath.lstrip('/'))
+
+            if node.is_dir():
+                # Create directory
+                os.makedirs(real_path, exist_ok=True)
+                exported += 1
+
+                if preserve_permissions:
+                    # Set directory permissions (remove file type bits)
+                    mode = node.mode & 0o777
+                    try:
+                        os.chmod(real_path, mode)
+                    except:
+                        pass  # Ignore permission errors
+
+            elif node.is_file():
+                # Create parent directory if needed
+                parent_dir = os.path.dirname(real_path)
+                os.makedirs(parent_dir, exist_ok=True)
+
+                # Write file content
+                import builtins
+                with builtins.open(real_path, 'wb') as f:
+                    f.write(node.content)
+                exported += 1
+
+                if preserve_permissions:
+                    # Set file permissions (remove file type bits)
+                    mode = node.mode & 0o777
+                    try:
+                        os.chmod(real_path, mode)
+                    except:
+                        pass  # Ignore permission errors
+
+                # Try to set ownership if running as root
+                if os.geteuid() == 0:
+                    real_uid = uid_map.get(node.uid, node.uid)
+                    real_gid = gid_map.get(node.gid, node.gid)
+                    try:
+                        os.chown(real_path, real_uid, real_gid)
+                    except:
+                        pass  # Ignore if can't change ownership
+
+        return exported
 
     # Serialization
 

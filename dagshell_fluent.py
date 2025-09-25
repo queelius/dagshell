@@ -736,6 +736,39 @@ class DagShell:
         """Alias for save - commit filesystem to JSON file."""
         return self.save(filename)
 
+    def export(self, target_path: str, preserve_permissions: bool = True) -> CommandResult:
+        """
+        Export virtual filesystem to real filesystem.
+
+        Args:
+            target_path: Directory to export to
+            preserve_permissions: Whether to preserve file modes
+
+        Returns:
+            CommandResult with export status
+        """
+        try:
+            exported = self.fs.export_to_real(target_path, preserve_permissions)
+            result = f"Exported {exported} files/directories to {target_path}"
+            return CommandResult(data=exported, text=result, exit_code=0)
+        except Exception as e:
+            error = f"Export failed: {e}"
+            return CommandResult(data=error, text=error, exit_code=1)
+
+    def whoami(self) -> CommandResult:
+        """Get current user name."""
+        # For now, return a default user
+        # This will be overridden by terminal session
+        username = "user"
+        return CommandResult(data=username, text=username, exit_code=0)
+
+    def su(self, username: str = 'root') -> CommandResult:
+        """Switch user (placeholder for terminal session)."""
+        # This is mainly for terminal session use
+        # The fluent API doesn't track user context by default
+        result = f"Switched to user: {username}"
+        return CommandResult(data=username, text=result, exit_code=0)
+
     def xargs(self, command: str, *args) -> CommandResult:
         """Build and execute command from input."""
         if not self._last_result:
