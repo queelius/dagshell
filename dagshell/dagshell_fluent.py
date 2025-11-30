@@ -76,13 +76,24 @@ class CommandResult:
         if self._shell and not path.startswith('/'):
             path = os.path.join(self._shell._cwd, path)
 
-        # Ensure parent directory exists
-        parent_path = os.path.dirname(path)
-        if parent_path and parent_path != '/' and not dagshell.exists(parent_path):
-            dagshell.mkdir(parent_path)
+        # Use shell's filesystem if available, otherwise fall back to global
+        if self._shell:
+            # Ensure parent directories exist (create nested if necessary)
+            parent_path = os.path.dirname(path)
+            if parent_path and parent_path != '/' and not self._shell.fs.exists(parent_path):
+                # Create parent directories recursively
+                self._shell.mkdir(parent_path, parents=True)
 
-        content = bytes(self)
-        dagshell.write(path, content)
+            content = bytes(self)
+            self._shell.fs.write(path, content)
+        else:
+            # Fall back to global filesystem
+            parent_path = os.path.dirname(path)
+            if parent_path and parent_path != '/' and not dagshell.exists(parent_path):
+                dagshell.mkdir(parent_path)
+
+            content = bytes(self)
+            dagshell.write(path, content)
         return self
 
     def append(self, path: str) -> 'CommandResult':
@@ -91,10 +102,27 @@ class CommandResult:
         if self._shell and not path.startswith('/'):
             path = os.path.join(self._shell._cwd, path)
 
-        # Read existing content
-        existing = dagshell.read(path) if dagshell.exists(path) else b''
-        content = existing + bytes(self)
-        dagshell.write(path, content)
+        # Use shell's filesystem if available, otherwise fall back to global
+        if self._shell:
+            # Ensure parent directories exist (create nested if necessary)
+            parent_path = os.path.dirname(path)
+            if parent_path and parent_path != '/' and not self._shell.fs.exists(parent_path):
+                # Create parent directories recursively
+                self._shell.mkdir(parent_path, parents=True)
+
+            # Read existing content from shell's filesystem
+            existing = self._shell.fs.read(path) if self._shell.fs.exists(path) else b''
+            content = existing + bytes(self)
+            self._shell.fs.write(path, content)
+        else:
+            # Fall back to global filesystem
+            parent_path = os.path.dirname(path)
+            if parent_path and parent_path != '/' and not dagshell.exists(parent_path):
+                dagshell.mkdir(parent_path)
+
+            existing = dagshell.read(path) if dagshell.exists(path) else b''
+            content = existing + bytes(self)
+            dagshell.write(path, content)
         return self
 
 
@@ -126,22 +154,49 @@ class DagShell:
         return result
 
     def _resolve_path(self, path: str) -> str:
-        """Resolve relative paths to absolute paths."""
+        """Resolve relative paths to absolute paths and normalize them."""
+        # Construct the full path
         if not path.startswith('/'):
-            # Handle relative paths
-            if path == '.':
-                return self._cwd
-            elif path == '..':
-                return str(PurePosixPath(self._cwd).parent)
-            elif path.startswith('./'):
-                path = path[2:]
-            elif path.startswith('../'):
-                parent = str(PurePosixPath(self._cwd).parent)
-                return self._resolve_path(parent + '/' + path[3:])
+            # Relative path - join with current directory
+            full_path = str(PurePosixPath(self._cwd) / path)
+        else:
+            # Absolute path
+            full_path = path
 
-            # Join with current directory
-            return str(PurePosixPath(self._cwd) / path)
-        return str(PurePosixPath(path))
+        # Normalize the path (resolve . and .. components)
+        # Split into parts and manually resolve . and ..
+        parts = full_path.split('/')
+        normalized = []
+
+        for part in parts:
+            if part == '' or part == '.':
+                # Skip empty parts and current directory references
+                continue
+            elif part == '..':
+                # Go up one level if possible
+                if normalized:
+                    normalized.pop()
+            else:
+                # Regular directory/file name
+                normalized.append(part)
+
+        # Reconstruct the path
+        result = '/' + '/'.join(normalized) if normalized else '/'
+        return result
+
+    def _ensure_parent_dirs(self, path: str) -> None:
+        """Ensure all parent directories exist, creating them if needed.
+
+        Args:
+            path: The directory path to ensure exists.
+        """
+        # Split the path into components
+        parts = path.strip('/').split('/')
+        current = ''
+        for part in parts:
+            current = f'{current}/{part}'
+            if not self.fs.exists(current):
+                self.fs.mkdir(current)
 
     def _glob_match(self, pattern: str, path: str = None) -> List[str]:
         """Match files using glob patterns."""
@@ -161,11 +216,39 @@ class DagShell:
     # State inspection methods
 
     def pwd(self) -> CommandResult:
-        """Get current working directory."""
+        """Print working directory.
+
+        Usage:
+            pwd
+
+        Options:
+            None
+
+        Examples:
+            pwd                    # Show current directory
+
+        Returns:
+            The absolute path of the current working directory.
+        """
         return self._make_result(data=self._cwd, text=self._cwd)
 
     def env(self, var: Optional[str] = None) -> CommandResult:
-        """Get environment variable(s)."""
+        """Display environment variables.
+
+        Usage:
+            env [VARIABLE]
+
+        Options:
+            VARIABLE               Name of specific variable to display
+
+        Examples:
+            env                    # Show all environment variables
+            env USER               # Show value of USER variable
+            env PATH               # Show value of PATH variable
+
+        Returns:
+            Environment variable value(s).
+        """
         if var:
             value = self._env.get(var, '')
             result = CommandResult(data=value, text=value)
@@ -175,7 +258,23 @@ class DagShell:
         return result
 
     def setenv(self, var: str, value: str) -> 'DagShell':
-        """Set an environment variable."""
+        """Set environment variable.
+
+        Usage:
+            setenv VARIABLE VALUE
+
+        Options:
+            VARIABLE               Variable name
+            VALUE                  Variable value
+
+        Examples:
+            setenv PATH /usr/bin   # Set PATH variable
+            setenv EDITOR vim      # Set default editor
+            setenv DEBUG true      # Set debug flag
+
+        Returns:
+            Self for method chaining.
+        """
         self._env[var] = value
         if var == 'PWD':
             self._cwd = value
@@ -184,7 +283,23 @@ class DagShell:
     # Navigation methods
 
     def cd(self, path: str = None) -> 'DagShell':
-        """Change current directory."""
+        """Change the current directory.
+
+        Usage:
+            cd [PATH]
+
+        Options:
+            PATH                   Directory to change to (default: HOME)
+
+        Examples:
+            cd                     # Go to home directory
+            cd /usr/bin            # Go to /usr/bin
+            cd ..                  # Go to parent directory
+            cd ~/documents         # Go to documents in home
+
+        Returns:
+            Self for method chaining.
+        """
         if path is None:
             path = self._env.get('HOME', '/')
 
@@ -220,7 +335,25 @@ class DagShell:
 
     def ls(self, path: Optional[str] = None,
            all: bool = False, long: bool = False) -> CommandResult:
-        """List directory contents."""
+        """List directory contents.
+
+        Usage:
+            ls [OPTIONS] [PATH]
+
+        Options:
+            -a, --all              Show hidden files (starting with .)
+            -l, --long             Use long listing format
+            PATH                   Directory to list (default: current)
+
+        Examples:
+            ls                     # List current directory
+            ls /usr                # List /usr directory
+            ls -a                  # Show all files including hidden
+            ls -la /tmp            # Long format with hidden files
+
+        Returns:
+            List of files and directories.
+        """
         target_path = self._resolve_path(path or self._cwd)
 
         if not self.fs.exists(target_path):
@@ -263,7 +396,22 @@ class DagShell:
         return result
 
     def cat(self, *paths: str) -> CommandResult:
-        """Concatenate and display files."""
+        """Concatenate and display files.
+
+        Usage:
+            cat [FILE...]
+
+        Options:
+            FILE                   File(s) to display
+
+        Examples:
+            cat file.txt           # Display contents of file.txt
+            cat f1.txt f2.txt      # Concatenate multiple files
+            echo "text" | cat      # Display piped input
+
+        Returns:
+            File contents as text.
+        """
         if not paths:
             # Read from stdin (last result)
             if self._last_result:
@@ -293,14 +441,45 @@ class DagShell:
         return self._make_result(data=data, text=text)
 
     def echo(self, *args: str, n: bool = False) -> CommandResult:
-        """Echo arguments to output."""
+        """Display a line of text.
+
+        Usage:
+            echo [OPTIONS] [STRING...]
+
+        Options:
+            -n                     Do not output trailing newline
+            STRING                 Text to display
+
+        Examples:
+            echo "Hello World"     # Print Hello World
+            echo -n "No newline"   # Print without newline
+            echo $USER             # Print environment variable
+
+        Returns:
+            The echoed text.
+        """
         text = ' '.join(str(arg) for arg in args)
         if not n:
             text += '\n'
         return self._make_result(data=text.encode('utf-8'), text=text.rstrip())
 
     def touch(self, path: str) -> 'DagShell':
-        """Create an empty file or update timestamp."""
+        """Create empty file or update timestamp.
+
+        Usage:
+            touch FILE
+
+        Options:
+            FILE                   File to create or update
+
+        Examples:
+            touch newfile.txt      # Create empty file
+            touch existing.txt     # Update timestamp
+            touch /tmp/marker      # Create file with absolute path
+
+        Returns:
+            Self for method chaining.
+        """
         resolved = self._resolve_path(path)
         if not self.fs.exists(resolved):
             self.fs.write(resolved, b'')
@@ -308,7 +487,23 @@ class DagShell:
         return self
 
     def mkdir(self, path: str, parents: bool = False) -> 'DagShell':
-        """Create a directory."""
+        """Create directories.
+
+        Usage:
+            mkdir [OPTIONS] DIRECTORY
+
+        Options:
+            -p, --parents          Create parent directories as needed
+            DIRECTORY              Directory name to create
+
+        Examples:
+            mkdir mydir            # Create directory
+            mkdir -p a/b/c         # Create nested directories
+            mkdir /tmp/test        # Create with absolute path
+
+        Returns:
+            Self for method chaining.
+        """
         resolved = self._resolve_path(path)
 
         if parents:
@@ -329,7 +524,24 @@ class DagShell:
         return self
 
     def rm(self, path: str, recursive: bool = False, force: bool = False) -> 'DagShell':
-        """Remove files or directories."""
+        """Remove files or directories.
+
+        Usage:
+            rm [OPTIONS] FILE
+
+        Options:
+            -r, --recursive        Remove directories recursively
+            -f, --force            Ignore nonexistent files
+            FILE                   File or directory to remove
+
+        Examples:
+            rm file.txt            # Remove a file
+            rm -r mydir            # Remove directory recursively
+            rm -rf /tmp/cache      # Force remove directory
+
+        Returns:
+            Self for method chaining.
+        """
         resolved = self._resolve_path(path)
 
         if not self.fs.exists(resolved) and not force:
@@ -345,7 +557,23 @@ class DagShell:
         return self
 
     def cp(self, src: str, dst: str) -> 'DagShell':
-        """Copy files or directories."""
+        """Copy files or directories.
+
+        Usage:
+            cp SOURCE DEST
+
+        Options:
+            SOURCE                 Source file/directory
+            DEST                   Destination path
+
+        Examples:
+            cp file1.txt file2.txt # Copy file
+            cp doc.txt /tmp/       # Copy to directory
+            cp -r dir1 dir2        # Copy directory (when implemented)
+
+        Returns:
+            Self for method chaining.
+        """
         src_path = self._resolve_path(src)
         dst_path = self._resolve_path(dst)
 
@@ -358,11 +586,34 @@ class DagShell:
             )
             return self
 
+        # Check if destination is a directory
+        dst_stat = self.fs.stat(dst_path)
+        if dst_stat and dst_stat['type'] == 'dir':
+            # If dst is a directory, copy src into it with the same name
+            src_name = os.path.basename(src_path)
+            dst_path = os.path.join(dst_path, src_name)
+
         self.fs.write(dst_path, content)
         return self
 
     def mv(self, src: str, dst: str) -> 'DagShell':
-        """Move/rename files or directories."""
+        """Move or rename files and directories.
+
+        Usage:
+            mv SOURCE DEST
+
+        Options:
+            SOURCE                 Source file/directory
+            DEST                   Destination path
+
+        Examples:
+            mv old.txt new.txt     # Rename file
+            mv file.txt /tmp/      # Move to directory
+            mv dir1 dir2           # Rename directory
+
+        Returns:
+            Self for method chaining.
+        """
         self.cp(src, dst)
         self.rm(src)
         return self
@@ -371,7 +622,26 @@ class DagShell:
 
     def grep(self, pattern: str, *paths: str,
              ignore_case: bool = False, invert: bool = False) -> CommandResult:
-        """Search for pattern in files or input."""
+        """Search for patterns in files or input.
+
+        Usage:
+            grep [OPTIONS] PATTERN [FILE...]
+
+        Options:
+            -i, --ignore-case      Ignore case distinctions
+            -v, --invert           Select non-matching lines
+            PATTERN                Regular expression pattern
+            FILE                   File(s) to search (default: stdin)
+
+        Examples:
+            grep "error" log.txt   # Find lines with "error"
+            grep -i "ERROR" *.log  # Case-insensitive search
+            ls | grep ".txt"       # Filter ls output
+            grep -v "#" config     # Show non-comment lines
+
+        Returns:
+            Lines matching the pattern.
+        """
         import re
 
         # Prepare regex
@@ -417,7 +687,23 @@ class DagShell:
         return result
 
     def head(self, n: int = 10, *paths: str) -> CommandResult:
-        """Display first n lines of input."""
+        """Display first lines of a file.
+
+        Usage:
+            head [OPTIONS] [FILE...]
+
+        Options:
+            -n NUM                 Number of lines to display (default: 10)
+            FILE                   File(s) to read (default: stdin)
+
+        Examples:
+            head file.txt          # Show first 10 lines
+            head -n 5 file.txt     # Show first 5 lines
+            cat log | head -20     # Show first 20 lines of piped input
+
+        Returns:
+            The first n lines of input.
+        """
         # Get input
         if paths:
             lines = []
@@ -440,7 +726,23 @@ class DagShell:
         return result
 
     def tail(self, n: int = 10, *paths: str) -> CommandResult:
-        """Display last n lines of input."""
+        """Display last lines of a file.
+
+        Usage:
+            tail [OPTIONS] [FILE...]
+
+        Options:
+            -n NUM                 Number of lines to display (default: 10)
+            FILE                   File(s) to read (default: stdin)
+
+        Examples:
+            tail file.txt          # Show last 10 lines
+            tail -n 20 error.log   # Show last 20 lines
+            dmesg | tail -5        # Show last 5 lines of piped input
+
+        Returns:
+            The last n lines of input.
+        """
         # Get input
         if paths:
             lines = []
@@ -456,15 +758,34 @@ class DagShell:
             else:
                 lines = []
 
-        # Take last n lines
-        tail_lines = lines[-n:] if lines else []
+        # Take last n lines (handle n=0 case explicitly since -0 == 0 in Python)
+        tail_lines = lines[-n:] if lines and n > 0 else []
         result = CommandResult(data=tail_lines, text='\n'.join(tail_lines))
         self._last_result = result
         return result
 
     def wc(self, *paths: str, lines: bool = True,
            words: bool = False, chars: bool = False) -> CommandResult:
-        """Word, line, and character count."""
+        """Print line, word, and character counts.
+
+        Usage:
+            wc [OPTIONS] [FILE...]
+
+        Options:
+            -l, --lines            Print line count
+            -w, --words            Print word count
+            -c, --chars            Print character count
+            FILE                   File(s) to count (default: stdin)
+
+        Examples:
+            wc file.txt            # Count lines in file
+            wc -l *.py             # Count lines in Python files
+            wc -w document.txt     # Count words
+            echo "test" | wc -c    # Count characters in piped input
+
+        Returns:
+            Count statistics.
+        """
         # Get input
         if paths:
             text_data = []
@@ -514,7 +835,26 @@ class DagShell:
 
     def sort(self, *paths: str, reverse: bool = False,
              numeric: bool = False, unique: bool = False) -> CommandResult:
-        """Sort lines of text."""
+        """Sort lines of text files.
+
+        Usage:
+            sort [OPTIONS] [FILE...]
+
+        Options:
+            -r, --reverse          Sort in reverse order
+            -n, --numeric          Sort numerically
+            -u, --unique           Remove duplicate lines
+            FILE                   File(s) to sort (default: stdin)
+
+        Examples:
+            sort names.txt         # Sort alphabetically
+            sort -r file.txt       # Sort in reverse
+            sort -n numbers.txt    # Sort numerically
+            ls | sort -r           # Sort ls output in reverse
+
+        Returns:
+            Sorted lines.
+        """
         # Get input
         if paths:
             lines = []
@@ -557,7 +897,23 @@ class DagShell:
         return result
 
     def uniq(self, *paths: str, count: bool = False) -> CommandResult:
-        """Remove duplicate lines."""
+        """Report or omit repeated lines.
+
+        Usage:
+            uniq [OPTIONS] [FILE...]
+
+        Options:
+            -c, --count            Prefix lines with occurrence count
+            FILE                   File(s) to process (default: stdin)
+
+        Examples:
+            uniq file.txt          # Remove consecutive duplicates
+            sort file | uniq       # Remove all duplicates (after sort)
+            uniq -c data.txt       # Count occurrences
+
+        Returns:
+            Unique lines.
+        """
         # Get input
         if paths:
             lines = []
@@ -613,16 +969,53 @@ class DagShell:
         return func(self)
 
     def tee(self, path: str) -> CommandResult:
-        """Write to file and also return the data (like Unix tee)."""
+        """Read from stdin and write to file and stdout.
+
+        Usage:
+            command | tee FILE
+
+        Options:
+            FILE                   Output file
+
+        Examples:
+            ls | tee list.txt      # Save ls output and display
+            echo "log" | tee -a log.txt  # Append and display
+
+        Returns:
+            The input data (passes through).
+        """
         if self._last_result:
-            self._last_result.out(path)
+            # Resolve path relative to current directory
+            resolved = self._resolve_path(path)
+            # Write directly to filesystem
+            content = bytes(self._last_result)
+            self.fs.write(resolved, content)
         return self._last_result or CommandResult(data=b'', text='')
 
     # Advanced features
 
     def find(self, path: Optional[str] = None, name: Optional[str] = None,
              type: Optional[str] = None, maxdepth: Optional[int] = None) -> CommandResult:
-        """Find files and directories."""
+        """Search for files and directories.
+
+        Usage:
+            find [PATH] [OPTIONS]
+
+        Options:
+            PATH                   Starting directory (default: current)
+            -name PATTERN          Find by name pattern (supports wildcards)
+            -type TYPE             Find by type (f=file, d=directory)
+            -maxdepth N            Maximum search depth
+
+        Examples:
+            find                   # List all files/dirs from current
+            find /usr -name "*.so" # Find .so files in /usr
+            find . -type f         # Find only files
+            find -maxdepth 2       # Search only 2 levels deep
+
+        Returns:
+            List of matching paths.
+        """
         start_path = self._resolve_path(path or self._cwd)
         found = []
 
@@ -690,7 +1083,22 @@ class DagShell:
         return result
 
     def save(self, filename: str = 'dagshell.json') -> CommandResult:
-        """Save filesystem to JSON file."""
+        """Save virtual filesystem to JSON file.
+
+        Usage:
+            save [FILENAME]
+
+        Options:
+            FILENAME               Output file (default: dagshell.json)
+
+        Examples:
+            save                   # Save to dagshell.json
+            save backup.json       # Save to specific file
+            save /tmp/fs.json      # Save with absolute path
+
+        Returns:
+            Status message.
+        """
         try:
             import json
             # Get JSON representation
@@ -707,7 +1115,22 @@ class DagShell:
             return CommandResult(data=error, text=error, exit_code=1)
 
     def load(self, filename: str = 'dagshell.json') -> CommandResult:
-        """Load filesystem from JSON file."""
+        """Load virtual filesystem from JSON file.
+
+        Usage:
+            load [FILENAME]
+
+        Options:
+            FILENAME               Input file (default: dagshell.json)
+
+        Examples:
+            load                   # Load from dagshell.json
+            load backup.json       # Load from specific file
+            load /tmp/fs.json      # Load from absolute path
+
+        Returns:
+            Status message.
+        """
         try:
             import json
             # Read from real file
@@ -733,19 +1156,39 @@ class DagShell:
             return CommandResult(data=error, text=error, exit_code=1)
 
     def commit(self, filename: str = 'dagshell.json') -> CommandResult:
-        """Alias for save - commit filesystem to JSON file."""
+        """Commit filesystem to JSON file (alias for save).
+
+        Usage:
+            commit [FILENAME]
+
+        Options:
+            FILENAME               Output file (default: dagshell.json)
+
+        Examples:
+            commit                 # Save to dagshell.json
+            commit state.json      # Save to specific file
+
+        Returns:
+            Status message.
+        """
         return self.save(filename)
 
     def export(self, target_path: str, preserve_permissions: bool = True) -> CommandResult:
-        """
-        Export virtual filesystem to real filesystem.
+        """Export virtual filesystem to real filesystem.
 
-        Args:
-            target_path: Directory to export to
-            preserve_permissions: Whether to preserve file modes
+        Usage:
+            export TARGET_PATH [OPTIONS]
+
+        Options:
+            TARGET_PATH            Real directory to export to
+            --no-preserve-perms    Don't preserve file permissions
+
+        Examples:
+            export /tmp/export     # Export to /tmp/export
+            export ~/backup        # Export to home directory
 
         Returns:
-            CommandResult with export status
+            Export status with file count.
         """
         try:
             exported = self.fs.export_to_real(target_path, preserve_permissions)
@@ -756,14 +1199,42 @@ class DagShell:
             return CommandResult(data=error, text=error, exit_code=1)
 
     def whoami(self) -> CommandResult:
-        """Get current user name."""
+        """Print effective username.
+
+        Usage:
+            whoami
+
+        Options:
+            None
+
+        Examples:
+            whoami                 # Show current username
+
+        Returns:
+            Current username.
+        """
         # For now, return a default user
         # This will be overridden by terminal session
         username = "user"
         return CommandResult(data=username, text=username, exit_code=0)
 
     def su(self, username: str = 'root') -> CommandResult:
-        """Switch user (placeholder for terminal session)."""
+        """Switch user account.
+
+        Usage:
+            su [USERNAME]
+
+        Options:
+            USERNAME               User to switch to (default: root)
+
+        Examples:
+            su                     # Switch to root
+            su alice               # Switch to user alice
+            su bob                 # Switch to user bob
+
+        Returns:
+            Status message.
+        """
         # This is mainly for terminal session use
         # The fluent API doesn't track user context by default
         result = f"Switched to user: {username}"
@@ -802,6 +1273,342 @@ class DagShell:
         result = CommandResult(data=results)
         self._last_result = result
         return result
+
+    def save(self, filename: str = 'dagshell.json') -> CommandResult:
+        """Save virtual filesystem to JSON file.
+
+        Usage:
+            save [FILENAME]
+
+        Options:
+            FILENAME               File to save to (default: dagshell.json)
+
+        Examples:
+            save                   # Save to dagshell.json
+            save backup.json       # Save to backup.json
+
+        Returns:
+            Status message.
+        """
+        # Get filesystem state as JSON
+        json_data = self.fs.to_json()
+
+        # Write to real filesystem
+        with open(filename, 'w') as f:
+            f.write(json_data)
+
+        result = f"Filesystem saved to {filename}"
+        return CommandResult(data=json_data, text=result, exit_code=0)
+
+    def load(self, filename: str = 'dagshell.json') -> CommandResult:
+        """Load virtual filesystem from JSON file.
+
+        Usage:
+            load [FILENAME]
+
+        Options:
+            FILENAME               File to load from (default: dagshell.json)
+
+        Examples:
+            load                   # Load from dagshell.json
+            load backup.json       # Load from backup.json
+
+        Returns:
+            Status message.
+        """
+        try:
+            # Read from real filesystem
+            with open(filename, 'r') as f:
+                json_data = f.read()
+
+            # Create new filesystem from JSON
+            self.fs = dagshell.FileSystem.from_json(json_data)
+
+            # Reset working directory
+            self._cwd = '/'
+
+            result = f"Filesystem loaded from {filename}"
+            return CommandResult(data=json_data, text=result, exit_code=0)
+        except FileNotFoundError:
+            result = f"load: {filename}: No such file"
+            return CommandResult(data=None, text=result, exit_code=1)
+        except Exception as e:
+            result = f"load: {filename}: Error: {e}"
+            return CommandResult(data=None, text=result, exit_code=1)
+
+    def commit(self, filename: str = 'dagshell.json') -> CommandResult:
+        """Alias for save - commit virtual filesystem to JSON file.
+
+        Usage:
+            commit [FILENAME]
+
+        Options:
+            FILENAME               File to save to (default: dagshell.json)
+
+        Examples:
+            commit                 # Save to dagshell.json
+            commit state.json      # Save to state.json
+
+        Returns:
+            Status message.
+        """
+        return self.save(filename)
+
+    def import_file(self, real_path: str, virtual_path: Optional[str] = None,
+                    safe_paths: Optional[List[str]] = None, recursive: bool = True) -> CommandResult:
+        """Import a file from the real filesystem into the virtual filesystem.
+
+        Usage:
+            import_file REAL_PATH [VIRTUAL_PATH]
+
+        Options:
+            REAL_PATH              Path to file on real filesystem
+            VIRTUAL_PATH           Path in virtual filesystem (default: same as filename)
+            --safe-paths          List of allowed directory prefixes
+            --recursive           Import directories recursively (default: True)
+
+        Examples:
+            import_file /etc/hosts               # Import to /hosts
+            import_file ~/code/script.py /scripts/script.py
+            import_file ./data.csv /data/input.csv
+            import_file ~/project /proj --recursive=True  # Import entire directory tree
+
+        Security:
+            By default, imports are restricted to current directory and below.
+            Use safe_paths to specify allowed directories.
+
+        Returns:
+            Status message or error.
+        """
+        import os
+        import pathlib
+
+        # Default safe paths if not specified
+        if safe_paths is None:
+            safe_paths = [
+                os.getcwd(),  # Current directory
+                os.path.expanduser('~/'),  # Home directory
+                '/tmp',  # Temp directory
+            ]
+
+        # Resolve real path
+        real_path = os.path.abspath(os.path.expanduser(real_path))
+
+        # Security check - ensure path is within safe paths
+        is_safe = any(
+            real_path.startswith(os.path.abspath(safe))
+            for safe in safe_paths
+        )
+
+        if not is_safe:
+            result = (f"import_file: {real_path}: Permission denied. "
+                     f"Path not in safe paths: {safe_paths}")
+            return CommandResult(data=None, text=result, exit_code=1)
+
+        # Check if file exists
+        if not os.path.exists(real_path):
+            result = f"import_file: {real_path}: No such file or directory"
+            return CommandResult(data=None, text=result, exit_code=1)
+
+        # Determine virtual path
+        if virtual_path is None:
+            virtual_path = '/' + os.path.basename(real_path)
+        else:
+            virtual_path = self._resolve_path(virtual_path)
+            # If importing a file and virtual_path is an existing directory,
+            # append the original filename (like cp behavior)
+            if os.path.isfile(real_path) and self.fs.exists(virtual_path):
+                stat_info = self.fs.stat(virtual_path)
+                if stat_info and stat_info.get('type') == 'dir':
+                    virtual_path = os.path.join(virtual_path, os.path.basename(real_path))
+
+        try:
+            if os.path.isfile(real_path):
+                # Import single file
+                # Ensure parent directory exists (create recursively)
+                parent_dir = os.path.dirname(virtual_path)
+                if parent_dir and parent_dir != '/':
+                    # Create parent directories recursively
+                    self._ensure_parent_dirs(parent_dir)
+
+                with open(real_path, 'rb') as f:
+                    content = f.read()
+                self.fs.write(virtual_path, content)
+                result = f"Imported file: {real_path} -> {virtual_path}"
+
+            elif os.path.isdir(real_path):
+                # Import directory
+                imported = []
+                if recursive:
+                    # Import recursively using os.walk
+                    for root, dirs, files in os.walk(real_path):
+                        # Calculate relative path
+                        rel_root = os.path.relpath(root, real_path)
+                        if rel_root == '.':
+                            virt_root = virtual_path
+                        else:
+                            virt_root = os.path.join(virtual_path, rel_root)
+
+                        # Create directory
+                        self.fs.mkdir(virt_root)
+
+                        # Import files
+                        for file in files:
+                            real_file = os.path.join(root, file)
+                            virt_file = os.path.join(virt_root, file)
+
+                            with open(real_file, 'rb') as f:
+                                content = f.read()
+                            self.fs.write(virt_file, content)
+                            imported.append(virt_file)
+                else:
+                    # Import only top-level files (non-recursive)
+                    self.fs.mkdir(virtual_path)
+                    for item in os.listdir(real_path):
+                        item_path = os.path.join(real_path, item)
+                        if os.path.isfile(item_path):
+                            virt_file = os.path.join(virtual_path, item)
+                            with open(item_path, 'rb') as f:
+                                content = f.read()
+                            self.fs.write(virt_file, content)
+                            imported.append(virt_file)
+
+                result = (f"Imported directory: {real_path} -> {virtual_path}\n"
+                         f"Files imported: {len(imported)}")
+            else:
+                result = f"import_file: {real_path}: Not a regular file or directory"
+                return CommandResult(data=None, text=result, exit_code=1)
+
+            return CommandResult(data={'imported': real_path, 'to': virtual_path},
+                               text=result, exit_code=0)
+
+        except Exception as e:
+            result = f"import_file: {real_path}: Error: {e}"
+            return CommandResult(data=None, text=result, exit_code=1)
+
+    def export_file(self, virtual_path: str, real_path: Optional[str] = None,
+                    safe_paths: Optional[List[str]] = None, recursive: bool = True) -> CommandResult:
+        """Export a file from the virtual filesystem to the real filesystem.
+
+        Usage:
+            export_file VIRTUAL_PATH [REAL_PATH]
+
+        Options:
+            VIRTUAL_PATH           Path in virtual filesystem
+            REAL_PATH             Path on real filesystem (default: current dir)
+            --safe-paths          List of allowed directory prefixes
+            --recursive           Export directories recursively (default: True)
+
+        Examples:
+            export_file /data/results.csv       # Export to ./results.csv
+            export_file /config.json ~/config.json
+            export_file /project ./exported_project --recursive=True
+
+        Security:
+            By default, exports are restricted to current directory and below.
+            Use safe_paths to specify allowed directories.
+
+        Returns:
+            Status message or error.
+        """
+        import os
+
+        # Default safe paths if not specified
+        if safe_paths is None:
+            safe_paths = [
+                os.getcwd(),  # Current directory
+                os.path.expanduser('~/'),  # Home directory
+                '/tmp',  # Temp directory
+            ]
+
+        # Resolve virtual path
+        virtual_path = self._resolve_path(virtual_path)
+
+        # Check if virtual file exists
+        if not self.fs.exists(virtual_path):
+            result = f"export_file: {virtual_path}: No such file or directory"
+            return CommandResult(data=None, text=result, exit_code=1)
+
+        # Determine real path
+        if real_path is None:
+            real_path = os.path.join(os.getcwd(), os.path.basename(virtual_path))
+        else:
+            real_path = os.path.abspath(os.path.expanduser(real_path))
+
+        # Security check
+        is_safe = any(
+            real_path.startswith(os.path.abspath(safe))
+            for safe in safe_paths
+        )
+
+        if not is_safe:
+            result = (f"export_file: {real_path}: Permission denied. "
+                     f"Path not in safe paths: {safe_paths}")
+            return CommandResult(data=None, text=result, exit_code=1)
+
+        try:
+            # Get stat info to determine file type
+            stat_info = self.fs.stat(virtual_path)
+            if not stat_info:
+                result = f"export_file: {virtual_path}: No such file or directory"
+                return CommandResult(data=None, text=result, exit_code=1)
+
+            if stat_info['type'] == 'file':
+                # Export single file
+                content = self.fs.read(virtual_path)
+                os.makedirs(os.path.dirname(real_path), exist_ok=True)
+                with open(real_path, 'wb') as f:
+                    f.write(content)
+                result = f"Exported file: {virtual_path} -> {real_path}"
+
+            elif stat_info['type'] == 'dir':
+                # Export directory
+                exported = []
+                os.makedirs(real_path, exist_ok=True)
+
+                if recursive:
+                    # Export recursively
+                    def export_recursive_helper(vpath, rpath):
+                        os.makedirs(rpath, exist_ok=True)
+                        for item in self.fs.ls(vpath) or []:
+                            vitem = os.path.join(vpath, item)
+                            ritem = os.path.join(rpath, item)
+
+                            item_stat = self.fs.stat(vitem)
+                            if item_stat and item_stat['type'] == 'file':
+                                content = self.fs.read(vitem)
+                                with open(ritem, 'wb') as f:
+                                    f.write(content)
+                                exported.append(ritem)
+                            elif item_stat and item_stat['type'] == 'dir':
+                                export_recursive_helper(vitem, ritem)
+
+                    export_recursive_helper(virtual_path, real_path)
+                else:
+                    # Export only top-level files (non-recursive)
+                    for item in self.fs.ls(virtual_path) or []:
+                        vitem = os.path.join(virtual_path, item)
+                        ritem = os.path.join(real_path, item)
+
+                        item_stat = self.fs.stat(vitem)
+                        if item_stat and item_stat['type'] == 'file':
+                            content = self.fs.read(vitem)
+                            with open(ritem, 'wb') as f:
+                                f.write(content)
+                            exported.append(ritem)
+
+                result = (f"Exported directory: {virtual_path} -> {real_path}\n"
+                         f"Files exported: {len(exported)}")
+            else:
+                result = f"export_file: {virtual_path}: Not a regular file or directory"
+                return CommandResult(data=None, text=result, exit_code=1)
+
+            return CommandResult(data={'exported': virtual_path, 'to': real_path},
+                               text=result, exit_code=0)
+
+        except Exception as e:
+            result = f"export_file: {virtual_path}: Error: {e}"
+            return CommandResult(data=None, text=result, exit_code=1)
 
 
 # Create a default global instance

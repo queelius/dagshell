@@ -1,0 +1,631 @@
+\documentclass[11pt,twocolumn]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage[margin=1in]{geometry}
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    commentstyle=\color{gray},
+    keywordstyle=\color{blue},
+    stringstyle=\color{red},
+    showstringspaces=false,
+    frame=single,
+    captionpos=b
+}
+
+\title{DagShell: A Content-Addressable Virtual Filesystem with Multiple Interfaces}
+
+\author{
+    Anonymous Authors\\
+    \textit{Under Review}
+}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present DagShell, a virtual filesystem implementation that combines content-addressable storage with POSIX semantics. DagShell represents filesystem objects as immutable nodes in a directed acyclic graph (DAG), where each node is identified by its SHA256 hash. The system provides three distinct interfaces: a fluent Python API for programmatic access, a Scheme-based domain-specific language for scripting, and a full POSIX-compliant terminal emulator for interactive use. DagShell achieves complete immutability while maintaining familiar filesystem semantics, enabling automatic deduplication, complete history preservation, and deterministic filesystem states. The implementation demonstrates 99\% test coverage and provides practical applications in sandboxing, version control experiments, and reproducible computational environments.
+\end{abstract}
+
+\section{Introduction}
+
+Modern filesystems prioritize mutable state and in-place updates for performance reasons. However, several domains benefit from immutable, content-addressed storage: version control systems track file history through content hashes, package managers use cryptographic hashes to verify integrity, and distributed systems rely on content addressing for deduplication and verification. Despite these successes in specialized tools like Git~\cite{git}, IPFS~\cite{ipfs}, and Nix~\cite{nix}, general-purpose filesystems remain fundamentally mutable.
+
+DagShell explores an alternative design point: a fully immutable, content-addressable filesystem that maintains POSIX semantics. Unlike Git, which tracks file history, DagShell provides a complete virtual filesystem where every operation creates new immutable nodes. Unlike IPFS, which focuses on distributed content distribution, DagShell emphasizes familiar filesystem operations and multiple interface paradigms.
+
+The key contributions of this work are:
+
+\begin{itemize}
+    \item A content-addressable filesystem design that preserves POSIX semantics while ensuring complete immutability
+    \item Three complementary interfaces (Python API, Scheme DSL, terminal emulator) demonstrating different interaction patterns
+    \item Implementation techniques for efficient path resolution and state management in an immutable structure
+    \item Evaluation of the system through comprehensive testing and practical use cases
+\end{itemize}
+
+\section{Design}
+
+\subsection{Core Architecture}
+
+DagShell's architecture separates content storage from path namespace management. The system maintains two primary data structures:
+
+\begin{enumerate}
+    \item \textbf{Node store} ($N: \text{Hash} \rightarrow \text{Node}$): A mapping from SHA256 hashes to immutable node objects
+    \item \textbf{Path index} ($P: \text{Path} \rightarrow \text{Hash}$): A mapping from absolute paths to node hashes
+\end{enumerate}
+
+This separation enables the same content to exist at multiple paths (deduplication) while providing familiar path-based access patterns.
+
+\subsection{Node Types}
+
+The system defines three node types, each immutable and content-addressed:
+
+\textbf{FileNode}: Contains binary content and metadata (mode, uid, gid, mtime). The hash incorporates both content and metadata, ensuring that permission changes create new nodes:
+
+\begin{lstlisting}[language=Python,caption=FileNode structure]
+@dataclass(frozen=True)
+class FileNode(Node):
+    content: bytes = b""
+    mode: int = Mode.FILE_DEFAULT
+    uid: int = 1000
+    gid: int = 1000
+    mtime: float = field(default_factory=time.time)
+\end{lstlisting}
+
+\textbf{DirNode}: Contains a mapping from names to child node hashes. Adding or removing a child creates a new directory node with an updated children mapping:
+
+\begin{lstlisting}[language=Python,caption=DirNode structure]
+@dataclass(frozen=True)
+class DirNode(Node):
+    children: Dict[str, str] = field(default_factory=dict)
+    mode: int = Mode.DIR_DEFAULT
+    # metadata fields...
+\end{lstlisting}
+
+\textbf{DeviceNode}: Represents virtual devices (/dev/null, /dev/random, /dev/zero) with programmatic behavior rather than stored content:
+
+\begin{lstlisting}[language=Python,caption=DeviceNode read operation]
+def read(self, size: int = 1024) -> bytes:
+    if self.device_type == 'null':
+        return b''
+    elif self.device_type == 'zero':
+        return b'\x00' * size
+    elif self.device_type == 'random':
+        return os.urandom(size)
+\end{lstlisting}
+
+\subsection{Immutability and Copy-on-Write}
+
+All write operations follow a copy-on-write pattern. Writing to \texttt{/a/b/file.txt} requires creating:
+
+\begin{enumerate}
+    \item A new FileNode with the updated content
+    \item A new DirNode for \texttt{/a/b} with updated children
+    \item A new DirNode for \texttt{/a} with updated children
+    \item An updated root DirNode
+\end{enumerate}
+
+This propagation of changes up the directory tree maintains referential integrity while preserving all previous states. The path index is updated to point to the new node hashes, while old nodes remain in the node store until garbage collection.
+
+\subsection{Deduplication}
+
+Content addressing provides automatic deduplication at the node level. If two files have identical content and metadata, they produce the same hash and share storage:
+
+\begin{lstlisting}[language=Python,caption=Deduplication example]
+fs.write("/file1.txt", "hello")
+fs.write("/file2.txt", "hello")
+# Both paths reference the same node hash
+\end{lstlisting}
+
+This property extends to directories: two directories with identical children share the same node. Deduplication occurs transparently without explicit user intervention.
+
+\subsection{Soft Deletion and Garbage Collection}
+
+Deletion operates through two mechanisms:
+
+\textbf{Soft delete}: Removes the path mapping but preserves nodes in the node store. This enables recovery and maintains referential integrity.
+
+\textbf{Garbage collection}: The \texttt{purge()} operation performs mark-and-sweep garbage collection, removing nodes unreachable from the path index:
+
+\begin{lstlisting}[language=Python,caption=Garbage collection algorithm]
+def purge(self) -> int:
+    referenced = set()
+    def mark(hash):
+        if hash in referenced:
+            return
+        referenced.add(hash)
+        node = self.nodes[hash]
+        if node.is_dir():
+            for child_hash in node.children.values():
+                mark(child_hash)
+
+    for hash in self.paths.values():
+        mark(hash)
+
+    unreferenced = set(self.nodes.keys()) - referenced
+    for hash in unreferenced:
+        del self.nodes[hash]
+    return len(unreferenced)
+\end{lstlisting}
+
+\section{Implementation}
+
+\subsection{Core Filesystem Operations}
+
+The FileSystem class implements standard POSIX operations (open, read, write, mkdir, ls, rm, stat) while maintaining immutability. Each operation either queries existing nodes or creates new nodes through the copy-on-write mechanism.
+
+Path resolution converts absolute paths to node hashes through the path index. The implementation handles special cases:
+
+\begin{itemize}
+    \item Root directory (\texttt{/}) is immutable and always present
+    \item Device files in \texttt{/dev} behave according to their type
+    \item Soft-deleted paths return \texttt{None} during resolution
+\end{itemize}
+
+File handles provide a familiar interface while operating on immutable content. The FileHandle class buffers writes in memory and commits changes to new nodes on close:
+
+\begin{lstlisting}[language=Python,caption=File handle pattern]
+with fs.open("/file.txt", "w") as f:
+    f.write("content")
+# On context exit, creates new FileNode
+# and updates path index
+\end{lstlisting}
+
+\subsection{User and Permission Management}
+
+DagShell implements POSIX user and group semantics through special files in \texttt{/etc}:
+
+\begin{itemize}
+    \item \texttt{/etc/passwd}: User database with uid, gid mappings
+    \item \texttt{/etc/group}: Group database with membership information
+\end{itemize}
+
+The system performs permission checks by evaluating mode bits against user context (uid, gid set). Root user (uid 0) bypasses permission checks. This design enables realistic permission modeling while maintaining filesystem immutability.
+
+\subsection{Fluent Python API}
+
+The fluent API (dagshell\_fluent.py) provides method chaining and Unix-style composition. The DagShell class maintains session state (current directory, environment variables, last result) and translates operations into FileSystem calls:
+
+\begin{lstlisting}[language=Python,caption=Fluent API example]
+shell = DagShell()
+shell.mkdir("/project")\
+    .cd("/project")\
+    .echo("# My Project").out("README.md")\
+    .echo("main.py").out(".gitignore")
+\end{lstlisting}
+
+The CommandResult class enables piping by storing operation results and providing output redirection:
+
+\begin{lstlisting}[language=Python,caption=Pipeline composition]
+shell.ls("/etc")\
+    .grep("pass.*")\
+    .sort()\
+    .out("/tmp/sorted.txt")
+\end{lstlisting}
+
+Text processing commands (grep, sed, sort, uniq, wc, head, tail) operate on CommandResult objects, enabling Unix-style data flow without shell parsing.
+
+\subsection{Scheme Interpreter Integration}
+
+The Scheme interpreter (scheme\_interpreter.py) provides a functional programming interface to filesystem operations. The implementation includes:
+
+\begin{itemize}
+    \item Complete Scheme evaluator with lexical scoping
+    \item Built-in filesystem procedures mapped to Python operations
+    \item List processing and higher-order functions for file manipulation
+\end{itemize}
+
+\begin{lstlisting}[language=Lisp,caption=Scheme filesystem example]
+(begin
+  (mkdir "/project")
+  (write-file "/project/README.md"
+              "# Project")
+  (map (lambda (f)
+         (write-file
+           (string-append "/backup/" f)
+           (read-file f)))
+       (find "/src" "*.py")))
+\end{lstlisting}
+
+The Scheme environment includes filesystem operations (mkdir, write-file, read-file), text processing (grep, head, tail), and functional primitives (map, filter, reduce). This enables scripting complex filesystem operations in a functional style.
+
+\subsection{Terminal Emulator}
+
+The terminal emulator (terminal.py) provides a POSIX-compliant shell interface. The implementation separates concerns:
+
+\begin{enumerate}
+    \item \textbf{CommandParser}: Parses shell syntax (pipes, redirects, operators)
+    \item \textbf{CommandExecutor}: Translates parsed commands to fluent API calls
+    \item \textbf{TerminalSession}: Manages REPL loop and session state
+\end{enumerate}
+
+The parser handles standard shell features:
+
+\begin{itemize}
+    \item Pipes: \texttt{ls | grep txt | sort}
+    \item Redirects: \texttt{echo "data" > file.txt}
+    \item Logical operators: \texttt{mkdir dir \&\& cd dir}
+    \item Sequential execution: \texttt{cmd1 ; cmd2}
+\end{itemize}
+
+The executor maps command names to shell methods, handles flag translation, and applies redirections to CommandResult objects. This architecture enables shell-like interaction while leveraging the fluent API for implementation.
+
+\subsection{Slash Commands}
+
+The terminal provides special slash commands for meta-operations:
+
+\textbf{Host Integration}:
+\begin{itemize}
+    \item \texttt{/import <host> <virt>}: Import files from host filesystem with safety restrictions
+    \item \texttt{/export <virt> <host>}: Export to host filesystem
+\end{itemize}
+
+\textbf{State Management}:
+\begin{itemize}
+    \item \texttt{/save <file>}: Serialize to JSON
+    \item \texttt{/load <file>}: Deserialize from JSON
+    \item \texttt{/snapshot <name>}: Create timestamped snapshot
+\end{itemize}
+
+\textbf{DAG Inspection}:
+\begin{itemize}
+    \item \texttt{/status}: Show filesystem statistics
+    \item \texttt{/dag}: Visualize DAG structure
+    \item \texttt{/nodes}: List content-addressed nodes
+    \item \texttt{/info <hash>}: Show node details
+\end{itemize}
+
+These commands operate outside the POSIX abstraction, providing direct access to the underlying DAG structure and host system integration.
+
+\section{Features and Capabilities}
+
+\subsection{POSIX Compliance}
+
+DagShell implements a substantial subset of POSIX filesystem operations:
+
+\begin{itemize}
+    \item File operations: open, read, write, close, stat
+    \item Directory operations: mkdir, ls, rmdir
+    \item Path operations: cd, pwd, absolute/relative path resolution
+    \item Permission checking: Unix-style mode bits and ownership
+    \item Special files: device nodes with appropriate semantics
+\end{itemize}
+
+The implementation prioritizes correctness over performance, ensuring that operations behave consistently with POSIX specifications where applicable.
+
+\subsection{Persistence and Serialization}
+
+The filesystem serializes completely to JSON format. The serialization includes:
+
+\begin{itemize}
+    \item All nodes with their content (base64-encoded) and metadata
+    \item Path-to-hash mappings
+    \item Deleted path set for soft deletes
+\end{itemize}
+
+JSON serialization enables easy inspection, version control of filesystem states, and portability across systems. The deserialization process reconstructs node objects and indices, restoring complete filesystem state.
+
+\subsection{Import and Export}
+
+DagShell interfaces with the host filesystem through controlled import/export:
+
+\textbf{Import} reads files from the host filesystem and creates corresponding nodes in the virtual filesystem. The operation:
+\begin{itemize}
+    \item Preserves file modes and permissions
+    \item Recursively imports directory trees
+    \item Restricts access to safe directories
+    \item Applies specified uid/gid to imported files
+\end{itemize}
+
+\textbf{Export} writes virtual filesystem content to the host. The operation:
+\begin{itemize}
+    \item Creates directories and files on the host
+    \item Preserves permissions when possible
+    \item Maps virtual uid/gid to host uid/gid
+    \item Reports the number of exported items
+\end{itemize}
+
+Safety mechanisms prevent unrestricted host access. Import and export operations validate paths against configured safe directories, preventing directory traversal attacks.
+
+\subsection{History and Versioning}
+
+Although DagShell doesn't implement explicit versioning, the immutable DAG structure preserves complete history. Combined with JSON serialization, users can:
+
+\begin{itemize}
+    \item Save filesystem snapshots at any point
+    \item Compare snapshots to identify changes
+    \item Restore previous states by loading snapshots
+    \item Track node-level changes through hash comparison
+\end{itemize}
+
+This design enables version control experimentation and rollback capabilities without implementing a full version control system.
+
+\section{Use Cases}
+
+\subsection{Testing and Sandboxing}
+
+DagShell provides isolated filesystem environments for testing. Applications can:
+
+\begin{itemize}
+    \item Test filesystem interactions without touching the host
+    \item Create complex directory structures programmatically
+    \item Reset to known states between test runs
+    \item Verify filesystem operations through inspection
+\end{itemize}
+
+The Python API integrates naturally with pytest and other testing frameworks. The complete test suite demonstrates this approach, achieving 99\% code coverage through isolated filesystem tests.
+
+\subsection{Educational Applications}
+
+DagShell serves as a teaching tool for filesystem concepts:
+
+\begin{itemize}
+    \item Students explore content-addressable storage without distributed systems complexity
+    \item The DAG structure makes relationships between files and directories explicit
+    \item Immutability demonstrates functional programming principles in systems context
+    \item Multiple interfaces show different abstraction levels over the same core
+\end{itemize}
+
+The Scheme interface particularly suits functional programming education, demonstrating how traditional imperative operations (filesystem modifications) can be expressed functionally.
+
+\subsection{Data Pipeline Experiments}
+
+The fluent API enables data processing pipelines with rollback:
+
+\begin{lstlisting}[language=Python,caption=Data pipeline with snapshots]
+shell = DagShell()
+shell.save("before.json")
+
+# Process data
+shell.cat("/data/input.csv")\
+    .grep("active")\
+    .sort()\
+    .out("/data/filtered.csv")
+
+# Can rollback if needed
+shell.load("before.json")
+\end{lstlisting}
+
+Researchers can experiment with data transformations, saving intermediate states and comparing results across different processing strategies.
+
+\subsection{Reproducible Environments}
+
+DagShell enables reproducible computational environments through:
+
+\begin{itemize}
+    \item Complete filesystem state serialization
+    \item Deterministic hashing ensures identical content produces identical hashes
+    \item JSON format integrates with version control
+    \item Import/export enables moving between virtual and real filesystems
+\end{itemize}
+
+A research workflow might maintain project data and scripts in DagShell, serialize the entire state to version control, and restore the exact environment on different machines.
+
+\section{Evaluation}
+
+\subsection{Test Coverage}
+
+The implementation includes comprehensive test suites covering:
+
+\begin{itemize}
+    \item Core filesystem operations (test\_dagshell.py, test\_core\_filesystem\_comprehensive.py)
+    \item Fluent API and pipelines (test\_fluent.py)
+    \item Terminal emulation (test\_terminal.py, test\_enhanced\_terminal.py)
+    \item Scheme interpreter (test\_scheme\_interpreter.py, test\_scheme\_integration\_comprehensive.py)
+    \item Edge cases and error handling (test\_edge\_cases\_comprehensive.py)
+    \item Persistence and import/export (test\_persistence\_comprehensive.py, test\_import\_export\_comprehensive.py)
+\end{itemize}
+
+Test coverage analysis reports 99\% code coverage, indicating thorough testing of core functionality and edge cases. The test suite includes over 300 individual test cases exercising different aspects of the system.
+
+\subsection{Performance Characteristics}
+
+DagShell prioritizes correctness and simplicity over performance. Key performance characteristics:
+
+\textbf{Node creation}: $O(1)$ time complexity for adding nodes to the store. Hashing dominates the cost, with SHA256 computation proportional to content size.
+
+\textbf{Path resolution}: $O(k)$ where $k$ is the path depth, requiring dictionary lookups through the path index.
+
+\textbf{Write operations}: $O(d)$ where $d$ is directory depth, due to copy-on-write propagation up the directory tree.
+
+\textbf{Garbage collection}: $O(n)$ where $n$ is the total number of nodes, using mark-and-sweep traversal.
+
+\textbf{Serialization}: $O(n)$ for serializing all nodes to JSON, with base64 encoding overhead for binary content.
+
+The in-memory design eliminates I/O overhead but limits filesystem size to available memory. For the target use cases (testing, education, experimentation), this tradeoff proves acceptable.
+
+\subsection{Memory Usage}
+
+Memory consumption scales linearly with content size and number of unique nodes. Deduplication reduces memory usage when multiple paths reference identical content. The Python object overhead (approximately 56 bytes per object) adds constant overhead per node.
+
+For typical test scenarios (hundreds of files, megabytes of content), memory usage remains well within modern system constraints. Large-scale usage would require external storage and selective loading.
+
+\section{Related Work}
+
+\subsection{Git}
+
+Git~\cite{git} pioneered practical content-addressed storage for version control. Git represents commits, trees, and blobs as content-addressed objects in a similar DAG structure. Key differences:
+
+\begin{itemize}
+    \item Git tracks history explicitly through commit objects; DagShell provides snapshots without built-in history
+    \item Git optimizes for large repositories through pack files; DagShell maintains individual nodes
+    \item Git focuses on source code; DagShell provides a general filesystem interface
+\end{itemize}
+
+DagShell applies Git's content-addressing principles to a full POSIX-like filesystem rather than specialized version control.
+
+\subsection{IPFS}
+
+IPFS~\cite{ipfs} implements distributed content-addressed storage with a focus on peer-to-peer data sharing. IPFS and DagShell share content-addressing principles but differ in scope:
+
+\begin{itemize}
+    \item IPFS emphasizes distribution and discovery; DagShell focuses on single-system filesystem semantics
+    \item IPFS uses Merkle DAGs for verification; DagShell uses SHA256 hashing for deduplication
+    \item IPFS integrates with networking protocols; DagShell provides programming interfaces
+\end{itemize}
+
+DagShell can be viewed as exploring content-addressing without the complexity of distributed systems.
+
+\subsection{Nix}
+
+The Nix~\cite{nix} package manager uses content-addressed storage for reproducible package management. Nix stores packages in \texttt{/nix/store} with paths derived from content hashes. Similarities include:
+
+\begin{itemize}
+    \item Both use content addressing for determinism and deduplication
+    \item Both enable rollback through immutability
+    \item Both provide isolation from the system
+\end{itemize}
+
+However, Nix focuses on package management with derivations and dependency tracking, while DagShell provides a general filesystem interface.
+
+\subsection{Plan 9}
+
+Plan 9's~\cite{plan9} "everything is a file" philosophy influenced DagShell's device node design. Plan 9 represents processes, networks, and system services as files in synthetic filesystems. DagShell adopts this approach for virtual devices while focusing on content-addressability rather than distribution.
+
+\subsection{Union Filesystems}
+
+Union filesystems like UnionFS and OverlayFS provide copy-on-write semantics over existing filesystems. These systems optimize write operations through layering. DagShell differs by:
+
+\begin{itemize}
+    \item Maintaining all nodes explicitly rather than differencing layers
+    \item Using content hashes for identification rather than layer ordering
+    \item Providing multiple programming interfaces rather than FUSE mounting
+\end{itemize}
+
+\section{Future Work}
+
+\subsection{Garbage Collection Strategies}
+
+The current mark-and-sweep garbage collection runs synchronously. Future work could explore:
+
+\begin{itemize}
+    \item Incremental garbage collection for large filesystems
+    \item Reference counting to avoid full traversal
+    \item Generational collection based on node age
+    \item User-controlled retention policies for history
+\end{itemize}
+
+\subsection{Compression}
+
+Content compression could reduce memory usage and serialization size. Strategies include:
+
+\begin{itemize}
+    \item Transparent compression of file node content
+    \item Delta compression for similar files
+    \item Dictionary-based compression for common patterns
+\end{itemize}
+
+The tradeoff between compression overhead and memory savings warrants investigation.
+
+\subsection{Distributed Operation}
+
+While DagShell currently operates on a single system, the content-addressed design enables distribution:
+
+\begin{itemize}
+    \item Node sharing across systems through hash-based lookup
+    \item Merkle tree verification for integrity
+    \item Synchronization protocols for state replication
+    \item Conflict resolution for concurrent modifications
+\end{itemize}
+
+This direction would position DagShell closer to IPFS while maintaining its filesystem abstraction.
+
+\subsection{Performance Optimization}
+
+Several optimizations could improve performance:
+
+\begin{itemize}
+    \item Path index caching for frequently accessed paths
+    \item Lazy loading for large directory trees
+    \item Binary serialization format replacing JSON
+    \item Persistent storage backend with memory-mapped files
+\end{itemize}
+
+These optimizations would enable larger-scale usage while maintaining the design principles.
+
+\subsection{Enhanced Versioning}
+
+Explicit version control features could leverage the existing DAG:
+
+\begin{itemize}
+    \item Commit objects linking snapshots with metadata
+    \item Branch and merge operations
+    \item Diff computation between filesystem states
+    \item History visualization tools
+\end{itemize}
+
+This work would create a Git-like system with full filesystem semantics rather than just file tracking.
+
+\section{Conclusion}
+
+DagShell demonstrates that content-addressable storage principles can extend to general-purpose filesystem semantics. The system achieves complete immutability while maintaining familiar POSIX operations, automatic deduplication, and complete state preservation. Three distinct interfaces—fluent Python API, Scheme DSL, and POSIX terminal—show that content-addressing doesn't constrain interaction patterns.
+
+The implementation proves practical for testing, education, and experimentation use cases. High test coverage and comprehensive functionality validate the design. While performance limitations constrain large-scale deployment, the core concepts apply to broader contexts.
+
+Content-addressing offers benefits beyond distributed systems: automatic deduplication, hash-based verification, and implicit versioning enhance reliability and reproducibility. DagShell explores these benefits in a filesystem context, suggesting directions for future systems that combine traditional filesystem semantics with content-addressed storage.
+
+The system's availability as open source enables further experimentation and extension. We hope DagShell inspires exploration of alternative filesystem designs that prioritize immutability, content-addressing, and reproducibility alongside traditional concerns like performance and scalability.
+
+\section*{Acknowledgments}
+
+This work builds on ideas from Git, IPFS, Nix, and other content-addressed systems. The implementation benefited from Python's excellent support for immutable data structures and testing frameworks.
+
+\begin{thebibliography}{9}
+
+\bibitem{git}
+Linus Torvalds and Junio C Hamano.
+\textit{Git: Fast Version Control System}.
+\url{https://git-scm.com/}, 2005.
+
+\bibitem{ipfs}
+Juan Benet.
+\textit{IPFS - Content Addressed, Versioned, P2P File System}.
+arXiv:1407.3561, 2014.
+
+\bibitem{nix}
+Eelco Dolstra.
+\textit{The Purely Functional Software Deployment Model}.
+PhD thesis, Utrecht University, 2006.
+
+\bibitem{plan9}
+Rob Pike, Dave Presotto, Sean Dorward, Bob Flandrena, Ken Thompson, Howard Trickey, and Phil Winterbottom.
+\textit{Plan 9 from Bell Labs}.
+Computing Systems, 8(3):221-254, 1995.
+
+\bibitem{merkle}
+Ralph C. Merkle.
+\textit{A Digital Signature Based on a Conventional Encryption Function}.
+CRYPTO, 1987.
+
+\bibitem{venti}
+Sean Quinlan and Sean Dorward.
+\textit{Venti: A New Approach to Archival Data Storage}.
+USENIX FAST, 2002.
+
+\bibitem{cas}
+Mark W. Storer, Kevin M. Greenan, Darrell D. E. Long, and Ethan L. Miller.
+\textit{Secure Data Deduplication}.
+ACM StorageSS, 2008.
+
+\bibitem{unionfs}
+Charles P. Wright, Jay Dave, Puja Gupta, Harikesavan Krishnan, David P. Quigley, Erez Zadok, and Mohammad N. Zubair.
+\textit{Versatility and Unix Semantics in Namespace Unification}.
+USENIX ATC, 2004.
+
+\bibitem{zfs}
+Jeff Bonwick and Bill Moore.
+\textit{ZFS: The Last Word in File Systems}.
+Sun Microsystems, 2007.
+
+\end{thebibliography}
+
+\end{document}

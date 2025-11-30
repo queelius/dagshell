@@ -653,6 +653,146 @@ developers:x:2000:alice,bob"""
 
         return exported
 
+    def import_from_real(self, source_path: str, target_path: str = '/',
+                         preserve_permissions: bool = True,
+                         uid: Optional[int] = None,
+                         gid: Optional[int] = None) -> int:
+        """
+        Import files from the real filesystem into the virtual filesystem.
+
+        Args:
+            source_path: Source file/directory on the real filesystem
+            target_path: Target path in the virtual filesystem
+            preserve_permissions: Whether to preserve file modes from real filesystem
+            uid: Override UID for imported files (default: 1000)
+            gid: Override GID for imported files (default: 1000)
+
+        Returns:
+            Number of files/directories imported
+
+        Raises:
+            FileNotFoundError: If source_path doesn't exist
+            ValueError: If target_path is invalid
+        """
+        import builtins
+
+        if uid is None:
+            uid = 1000
+        if gid is None:
+            gid = 1000
+
+        # Check if source exists
+        if not os.path.exists(source_path):
+            raise FileNotFoundError(f"Source path not found: {source_path}")
+
+        # Normalize target path
+        if not target_path.startswith('/'):
+            raise ValueError(f"Target path must be absolute: {target_path}")
+
+        imported = 0
+
+        # If source is a file
+        if os.path.isfile(source_path):
+            # Read content
+            with builtins.open(source_path, 'rb') as f:
+                content = f.read()
+
+            # Get mode if preserving permissions
+            mode = Mode.FILE_DEFAULT
+            if preserve_permissions:
+                stat = os.stat(source_path)
+                mode = Mode.IFREG | (stat.st_mode & 0o777)
+
+            # Write to virtual filesystem
+            self.write(target_path, content)
+
+            # Update permissions if needed
+            if target_path in self.paths:
+                node_hash = self.paths[target_path]
+                node = self.nodes[node_hash]
+                # Create new node with updated permissions
+                new_node = FileNode(
+                    content=node.content,
+                    mode=mode,
+                    uid=uid,
+                    gid=gid,
+                    mtime=node.mtime
+                )
+                new_hash = self._add_node(new_node)
+                self.paths[target_path] = new_hash
+                imported += 1
+
+        # If source is a directory
+        elif os.path.isdir(source_path):
+            # Walk the directory tree
+            for root, dirs, files in os.walk(source_path):
+                # Calculate relative path from source
+                rel_path = os.path.relpath(root, source_path)
+                if rel_path == '.':
+                    virt_root = target_path
+                else:
+                    virt_root = os.path.join(target_path, rel_path).replace('\\', '/')
+
+                # Create directory in virtual filesystem
+                if virt_root != '/':
+                    mode = Mode.DIR_DEFAULT
+                    if preserve_permissions:
+                        stat = os.stat(root)
+                        mode = Mode.IFDIR | (stat.st_mode & 0o777)
+                    self.mkdir(virt_root)
+
+                    # Update permissions
+                    if virt_root in self.paths:
+                        node_hash = self.paths[virt_root]
+                        node = self.nodes[node_hash]
+                        new_node = DirNode(
+                            mode=mode,
+                            uid=uid,
+                            gid=gid,
+                            mtime=node.mtime
+                        )
+                        new_hash = self._add_node(new_node)
+                        self.paths[virt_root] = new_hash
+                    imported += 1
+
+                # Import files in this directory
+                for filename in files:
+                    real_file_path = os.path.join(root, filename)
+                    virt_file_path = os.path.join(virt_root, filename).replace('\\', '/')
+
+                    # Read content
+                    with builtins.open(real_file_path, 'rb') as f:
+                        content = f.read()
+
+                    # Get mode if preserving permissions
+                    mode = Mode.FILE_DEFAULT
+                    if preserve_permissions:
+                        stat = os.stat(real_file_path)
+                        mode = Mode.IFREG | (stat.st_mode & 0o777)
+
+                    # Write to virtual filesystem
+                    self.write(virt_file_path, content)
+
+                    # Update permissions
+                    if virt_file_path in self.paths:
+                        node_hash = self.paths[virt_file_path]
+                        node = self.nodes[node_hash]
+                        new_node = FileNode(
+                            content=node.content,
+                            mode=mode,
+                            uid=uid,
+                            gid=gid,
+                            mtime=node.mtime
+                        )
+                        new_hash = self._add_node(new_node)
+                        self.paths[virt_file_path] = new_hash
+                    imported += 1
+
+        else:
+            raise ValueError(f"Source path is neither file nor directory: {source_path}")
+
+        return imported
+
     # Serialization
 
     def to_json(self) -> str:

@@ -69,3 +69,24 @@ demo_filesystem.json
 *.bak
 .temp/
 tmp/
+
+# Demo and test files
+*_demo.scm
+demo*.scm
+*demo.scm
+demo_history.txt
+test_*.py
+!tests/test_*.py
+
+# Test output
+test_results.txt
+
+# LaTeX/paper artifacts (keep paper/ but ignore build artifacts)
+*.aux
+*.bbl
+*.blg
+*.latexml.log
+*.out
+
+# Backup files
+Initial version

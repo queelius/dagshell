@@ -372,9 +372,9 @@ class TestDagShellChaining:
 
         # cat -> grep -> wc
         self.shell.cat('/home/user/data.txt')
-        self.shell.grep('a')  # matches apple, banana, apricot, grape
+        self.shell.grep('a')  # matches apple, banana, apricot, grape (all 4 have 'a')
         result = self.shell.wc()
-        assert result.data == 3  # 3 newlines in matched lines
+        assert result.data == 4  # 4 lines matched
 
     def test_output_redirection(self):
         """Test output redirection with .out()."""
@@ -470,8 +470,9 @@ class TestModuleLevelFunctions:
         dagshell._default_fs = None
         import dagshell.dagshell_fluent as dagshell_fluent
         dagshell_fluent._shell = DagShell()
+        dagshell_fluent.shell = dagshell_fluent._shell  # Update the module-level shell alias
         ds.shell.mkdir('/test')
-        ds.shell.fs.write('/test/file.txt', 'test content')
+        ds.shell.fs.write('/test/file.txt', b'test content')
 
     def test_convenience_functions(self):
         """Test module-level functions."""
@@ -541,7 +542,7 @@ class TestComplexPipelines:
         self.shell.cat('/system.log')
         self.shell.grep('ERROR')
         result = self.shell.wc()
-        assert result.data == 2  # 2 newlines in 3 lines
+        assert result.data == 3  # 3 ERROR lines
 
     def test_file_processing_pipeline(self):
         """Test file processing pipeline."""
