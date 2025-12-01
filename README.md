@@ -5,15 +5,16 @@ A virtual POSIX-compliant filesystem implementation with content-addressable DAG
 ## Quick Start
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install the package
+pip install -e .
 
 # Start the terminal emulator
-python terminal.py
+python -m dagshell.terminal
 
 # Or use the Python API directly
 python
->>> from dagshell_fluent import shell
+>>> from dagshell.dagshell_fluent import DagShell
+>>> shell = DagShell()
 >>> shell.mkdir("/project").cd("/project")
 >>> shell.echo("Hello, DagShell!").out("README.md")
 >>> shell.save("my_project.json")
@@ -26,13 +27,20 @@ python
 - **Multiple Interfaces**: Python API, Scheme DSL, Terminal emulator
 - **Persistence**: Save/load filesystem state as JSON
 - **Virtual Devices**: /dev/null, /dev/random, /dev/zero
-- **Comprehensive Testing**: 99% code coverage
+- **Directory Navigation**: cd, pushd, popd, dirs
+- **Import/Export**: Transfer files between real and virtual filesystems
+- **Command History**: Track and recall previous commands
+- **Comprehensive Testing**: 583 tests with 77% code coverage
 
-## Documentation
+## Development
 
-- [Terminal Usage Guide](TERMINAL_USAGE.md)
-- [Terminal Implementation](README_TERMINAL.md)
-- [Test Coverage Report](TEST_COVERAGE_REPORT.md)
+```bash
+# Run tests
+python -m pytest tests/ -v
+
+# Run with coverage
+python -m pytest tests/ --cov=dagshell --cov-report=term
+```
 
 ## License
 

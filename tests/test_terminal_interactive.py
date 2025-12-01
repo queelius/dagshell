@@ -55,7 +55,7 @@ def test_commands():
 
     print("\n" + "=" * 60)
     print(f"Results: {passed} passed, {failed} failed")
-    return failed == 0
+    assert failed == 0, f"{failed} test(s) failed"
 
 
 def main():
@@ -63,8 +63,11 @@ def main():
     import sys
 
     if len(sys.argv) > 1 and sys.argv[1] == "test":
-        success = test_commands()
-        sys.exit(0 if success else 1)
+        try:
+            test_commands()
+            sys.exit(0)
+        except AssertionError:
+            sys.exit(1)
     else:
         print("Starting interactive terminal emulator...")
         print("Type 'help' for help, 'exit' to quit\n")

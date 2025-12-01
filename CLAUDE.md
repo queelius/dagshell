@@ -80,6 +80,9 @@ python examples/demo_fluent.py
 - **Dual Nature**: Methods return CommandResult (Python object) OR redirect to virtual filesystem via `.out()`.
 - **Method Chaining**: `shell.mkdir("/project").cd("/project").echo("text").out("file.txt")`
 - **Piping**: Store last result in `_last_result`, accessible via `_()` method for pipe-like composition.
+- **Directory Stack**: `pushd`/`popd` for directory navigation with `_dir_stack`.
+- **Command History**: `_history` list tracks executed commands, accessible via `history()` method.
+- **Import/Export**: `import_file()` and `export_file()` for real filesystem interaction.
 
 ### Terminal Emulator (terminal.py)
 - **TerminalSession**: Main session manager with shell instance and command history.
@@ -112,7 +115,7 @@ python examples/demo_fluent.py
 4. **Testability**:
    - Pure functions where possible
    - Clear interfaces between components
-   - Comprehensive test suite with 99% coverage
+   - Comprehensive test suite with 77% coverage (583 tests)
 
 ## Testing Strategy
 

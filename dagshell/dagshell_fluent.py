@@ -146,6 +146,38 @@ class DagShell:
             'PWD': '/'
         }
         self._last_result: Optional[CommandResult] = None
+        self._dir_stack: List[str] = []  # Stack for pushd/popd
+        self._history: List[str] = []  # Command history
+        self._history_max: int = 1000  # Maximum history size
+
+    def _add_to_history(self, command: str) -> None:
+        """Add a command to history."""
+        if command and command.strip():
+            self._history.append(command.strip())
+            # Trim history if too long
+            if len(self._history) > self._history_max:
+                self._history = self._history[-self._history_max:]
+
+    def history(self, n: Optional[int] = None) -> CommandResult:
+        """Display command history.
+
+        Usage:
+            history [N]
+
+        Options:
+            N                      Number of recent commands to show
+
+        Returns:
+            Command history list.
+        """
+        if n is None:
+            hist = self._history.copy()
+        else:
+            hist = self._history[-n:] if n > 0 else []
+
+        # Format like bash history with line numbers
+        lines = [f"{i+1}  {cmd}" for i, cmd in enumerate(hist)]
+        return self._make_result(hist, '\n'.join(lines))
 
     def _make_result(self, data: Any, text: Optional[str] = None, exit_code: int = 0) -> CommandResult:
         """Create a CommandResult with shell context."""
@@ -330,6 +362,100 @@ class DagShell:
         self._env['PWD'] = new_path
         self._last_result = CommandResult(data=new_path, text='', exit_code=0)
         return self
+
+    def pushd(self, path: str) -> 'DagShell':
+        """Push current directory onto stack and change to new directory.
+
+        Usage:
+            pushd PATH
+
+        Options:
+            PATH                   Directory to change to
+
+        Examples:
+            pushd /tmp             # Push cwd, go to /tmp
+            pushd ~/projects       # Push cwd, go to projects
+
+        Returns:
+            Self for method chaining.
+        """
+        # Save current directory on stack
+        self._dir_stack.append(self._cwd)
+
+        # Change to new directory
+        new_path = self._resolve_path(path)
+
+        if not self.fs.exists(new_path):
+            # Pop the directory we just pushed since cd failed
+            self._dir_stack.pop()
+            self._last_result = CommandResult(
+                data=None,
+                text=f"pushd: {path}: No such file or directory",
+                exit_code=1
+            )
+            return self
+
+        stat = self.fs.stat(new_path)
+        if stat['type'] != 'dir':
+            self._dir_stack.pop()
+            self._last_result = CommandResult(
+                data=None,
+                text=f"pushd: {path}: Not a directory",
+                exit_code=1
+            )
+            return self
+
+        self._cwd = new_path
+        self._env['PWD'] = new_path
+
+        # Return stack info like bash does
+        stack_display = ' '.join([new_path] + list(reversed(self._dir_stack)))
+        self._last_result = CommandResult(data=self._dir_stack.copy(), text=stack_display, exit_code=0)
+        return self
+
+    def popd(self) -> 'DagShell':
+        """Pop directory from stack and change to it.
+
+        Usage:
+            popd
+
+        Examples:
+            popd                   # Return to previously pushed directory
+
+        Returns:
+            Self for method chaining.
+        """
+        if not self._dir_stack:
+            self._last_result = CommandResult(
+                data=None,
+                text="popd: directory stack empty",
+                exit_code=1
+            )
+            return self
+
+        # Pop directory from stack
+        prev_dir = self._dir_stack.pop()
+
+        # Change to it
+        self._cwd = prev_dir
+        self._env['PWD'] = prev_dir
+
+        # Return stack info
+        stack_display = ' '.join([prev_dir] + list(reversed(self._dir_stack)))
+        self._last_result = CommandResult(data=self._dir_stack.copy(), text=stack_display, exit_code=0)
+        return self
+
+    def dirs(self) -> CommandResult:
+        """Display directory stack.
+
+        Usage:
+            dirs
+
+        Returns:
+            Current directory stack.
+        """
+        stack = [self._cwd] + list(reversed(self._dir_stack))
+        return self._make_result(stack, ' '.join(stack))
 
     # File operations
 
@@ -614,9 +740,69 @@ class DagShell:
         Returns:
             Self for method chaining.
         """
-        self.cp(src, dst)
-        self.rm(src)
+        src_path = self._resolve_path(src)
+        dst_path = self._resolve_path(dst)
+
+        if not self.fs.exists(src_path):
+            self._last_result = CommandResult(
+                data=None,
+                text=f"mv: cannot stat '{src}': No such file or directory",
+                exit_code=1
+            )
+            return self
+
+        src_stat = self.fs.stat(src_path)
+
+        # Check if destination is an existing directory
+        dst_stat = self.fs.stat(dst_path)
+        if dst_stat and dst_stat['type'] == 'dir':
+            # Move source into the directory
+            src_name = os.path.basename(src_path)
+            dst_path = os.path.join(dst_path, src_name)
+
+        if src_stat and src_stat['type'] == 'dir':
+            # Moving a directory - need to recursively copy then delete
+            self._copy_dir_recursive(src_path, dst_path)
+            self._rm_recursive(src_path)
+        else:
+            # Moving a file - simple copy and delete
+            content = self.fs.read(src_path)
+            if content is not None:
+                self.fs.write(dst_path, content)
+                self.fs.rm(src_path)
+
         return self
+
+    def _copy_dir_recursive(self, src: str, dst: str) -> None:
+        """Recursively copy a directory."""
+        # Create destination directory
+        self.fs.mkdir(dst)
+
+        # Copy all children
+        children = self.fs.ls(src)
+        if children:
+            for child in children:
+                src_child = os.path.join(src, child)
+                dst_child = os.path.join(dst, child)
+                child_stat = self.fs.stat(src_child)
+
+                if child_stat and child_stat['type'] == 'dir':
+                    self._copy_dir_recursive(src_child, dst_child)
+                else:
+                    content = self.fs.read(src_child)
+                    if content is not None:
+                        self.fs.write(dst_child, content)
+
+    def _rm_recursive(self, path: str) -> None:
+        """Recursively remove a directory and its contents."""
+        stat = self.fs.stat(path)
+        if stat and stat['type'] == 'dir':
+            children = self.fs.ls(path)
+            if children:
+                for child in children:
+                    child_path = os.path.join(path, child)
+                    self._rm_recursive(child_path)
+        self.fs.rm(path)
 
     # Text processing methods
 
