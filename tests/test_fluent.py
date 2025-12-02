@@ -577,5 +577,295 @@ class TestComplexPipelines:
         assert result.data == ['9', '6', '5']
 
 
+class TestSymlinkCommands:
+    """Test symbolic link commands."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.shell = DagShell()
+        self.shell.mkdir('/test')
+        self.shell.echo('original content').out('/test/original.txt')
+
+    def test_ln_hard_link(self):
+        """Test creating hard links."""
+        self.shell.ln('/test/original.txt', '/test/hardlink.txt')
+
+        # Both files should have the same content
+        orig = self.shell.cat('/test/original.txt')
+        link = self.shell.cat('/test/hardlink.txt')
+        assert orig.text == link.text
+
+    def test_ln_symbolic_link(self):
+        """Test creating symbolic links."""
+        self.shell.ln('/test/original.txt', '/test/symlink.txt', symbolic=True)
+
+        # Symlink should resolve to original content
+        content = self.shell.cat('/test/symlink.txt')
+        assert 'original content' in content.text
+
+    def test_readlink(self):
+        """Test reading symbolic link targets."""
+        self.shell.ln('/test/original.txt', '/test/symlink.txt', symbolic=True)
+        result = self.shell.readlink('/test/symlink.txt')
+        assert '/test/original.txt' in result.text
+
+    def test_readlink_not_symlink(self):
+        """Test readlink on non-symlink."""
+        result = self.shell.readlink('/test/original.txt')
+        assert result.exit_code == 1
+
+
+class TestPermissionCommands:
+    """Test permission and ownership commands."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.shell = DagShell()
+        self.shell.mkdir('/test')
+        self.shell.echo('test content').out('/test/file.txt')
+
+    def test_chmod_octal(self):
+        """Test chmod with octal mode."""
+        self.shell.chmod('755', '/test/file.txt')
+
+        stat = self.shell.stat('/test/file.txt')
+        assert '755' in stat.text or 'rwxr-xr-x' in stat.text
+
+    def test_chmod_symbolic(self):
+        """Test chmod with symbolic mode."""
+        self.shell.chmod('u+x', '/test/file.txt')
+        # Verify execute bit is set
+        stat = self.shell.stat('/test/file.txt')
+        assert 'x' in stat.text
+
+    def test_chmod_symbolic_remove(self):
+        """Test chmod removing permissions."""
+        self.shell.chmod('777', '/test/file.txt')
+        self.shell.chmod('go-w', '/test/file.txt')
+        # Verify write is removed from group and other
+        stat = self.shell.stat('/test/file.txt')
+        assert 'rwxr-xr-x' in stat.text or '755' in stat.text
+
+    def test_chown(self):
+        """Test changing ownership."""
+        self.shell.chown('root', '/test/file.txt')
+
+        stat = self.shell.stat('/test/file.txt')
+        # Owner should be changed (uid 0 for root)
+        assert 'Uid: 0' in stat.text
+
+    def test_chown_with_group(self):
+        """Test changing owner and group."""
+        self.shell.chown('root:wheel', '/test/file.txt')
+        # Verify ownership changed
+        stat = self.shell.stat('/test/file.txt')
+        assert 'Uid: 0' in stat.text
+
+
+class TestUserCommands:
+    """Test user information commands."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.shell = DagShell()
+
+    def test_whoami(self):
+        """Test whoami command."""
+        result = self.shell.whoami()
+        assert result.exit_code == 0
+        assert result.text.strip() == 'user'
+
+    def test_id(self):
+        """Test id command."""
+        result = self.shell.id()
+        assert result.exit_code == 0
+        assert 'uid=' in result.text
+        assert 'gid=' in result.text
+
+    def test_stat_file(self):
+        """Test stat on a file."""
+        self.shell.echo('test').out('/test.txt')
+        result = self.shell.stat('/test.txt')
+        assert result.exit_code == 0
+        assert 'File:' in result.text
+        assert 'Size:' in result.text
+        assert 'Type: file' in result.text
+
+    def test_stat_directory(self):
+        """Test stat on a directory."""
+        self.shell.mkdir('/testdir')
+        result = self.shell.stat('/testdir')
+        assert result.exit_code == 0
+        assert 'Type: dir' in result.text
+
+
+class TestTextUtilities:
+    """Test text processing utilities."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.shell = DagShell()
+        self.shell.mkdir('/test')
+
+    def test_cut_delimiter_and_field(self):
+        """Test cut with delimiter and field."""
+        self.shell.echo('a:b:c:d').out('/test/data.txt')
+        result = self.shell.cut('/test/data.txt', delimiter=':', fields='2')
+        assert result.text.strip() == 'b'
+
+    def test_cut_multiple_fields(self):
+        """Test cut with multiple fields."""
+        self.shell.echo('a:b:c:d').out('/test/data.txt')
+        result = self.shell.cut('/test/data.txt', delimiter=':', fields='1,3')
+        assert 'a' in result.text
+        assert 'c' in result.text
+
+    def test_cut_range(self):
+        """Test cut with field range."""
+        self.shell.echo('a:b:c:d').out('/test/data.txt')
+        result = self.shell.cut('/test/data.txt', delimiter=':', fields='2-4')
+        assert 'b' in result.text
+
+    def test_tr_translate(self):
+        """Test tr character translation."""
+        self.shell.echo('hello world').out('/test/text.txt')
+        self.shell.cat('/test/text.txt')
+        result = self.shell.tr('a-z', 'A-Z')
+        assert result.text.strip() == 'HELLO WORLD'
+
+    def test_tr_delete(self):
+        """Test tr character deletion."""
+        self.shell.echo('hello123world').out('/test/text.txt')
+        self.shell.cat('/test/text.txt')
+        result = self.shell.tr('0-9', '', delete=True)
+        assert result.text.strip() == 'helloworld'
+
+    def test_du_basic(self):
+        """Test du disk usage."""
+        self.shell.echo('test content here').out('/test/file.txt')
+        result = self.shell.du('/test')
+        assert result.exit_code == 0
+        assert '/test' in result.text
+
+    def test_du_human_readable(self):
+        """Test du with human readable output."""
+        self.shell.echo('test').out('/test/file.txt')
+        result = self.shell.du('/test', human_readable=True)
+        assert result.exit_code == 0
+        # Should have unit suffix
+        assert any(unit in result.text for unit in ['B', 'K', 'M', 'G'])
+
+
+class TestDiffCommand:
+    """Test diff command."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.shell = DagShell()
+        self.shell.mkdir('/test')
+
+    def test_diff_identical(self):
+        """Test diff with identical files."""
+        self.shell.echo('same content').out('/test/file1.txt')
+        self.shell.echo('same content').out('/test/file2.txt')
+        result = self.shell.diff('/test/file1.txt', '/test/file2.txt')
+        assert result.exit_code == 0
+        assert result.text == ''
+
+    def test_diff_different(self):
+        """Test diff with different files."""
+        self.shell.echo('line 1').out('/test/file1.txt')
+        self.shell.echo('line 2').out('/test/file2.txt')
+        result = self.shell.diff('/test/file1.txt', '/test/file2.txt')
+        assert result.exit_code == 1  # Files differ
+        assert '<' in result.text  # Old file marker
+        assert '>' in result.text  # New file marker
+
+    def test_diff_unified(self):
+        """Test diff with unified output."""
+        self.shell.echo('line 1\nline 2').out('/test/file1.txt')
+        self.shell.echo('line 1\nline 3').out('/test/file2.txt')
+        result = self.shell.diff('/test/file1.txt', '/test/file2.txt', unified=True)
+        assert result.exit_code == 1
+        assert '---' in result.text
+        assert '+++' in result.text
+        assert '@@' in result.text
+
+    def test_diff_nonexistent_file(self):
+        """Test diff with nonexistent file."""
+        self.shell.echo('content').out('/test/file1.txt')
+        result = self.shell.diff('/test/file1.txt', '/test/nonexistent.txt')
+        assert result.exit_code == 1
+        assert 'No such file' in result.text
+
+
+class TestPathUtilities:
+    """Test path manipulation utilities."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.shell = DagShell()
+
+    def test_basename_simple(self):
+        """Test basename with simple path."""
+        result = self.shell.basename('/usr/bin/sort')
+        assert result.text == 'sort'
+
+    def test_basename_with_suffix(self):
+        """Test basename with suffix removal."""
+        result = self.shell.basename('include/stdio.h', '.h')
+        assert result.text == 'stdio'
+
+    def test_basename_trailing_slash(self):
+        """Test basename with trailing slash."""
+        result = self.shell.basename('/home/user/')
+        assert result.text == 'user'
+
+    def test_dirname_simple(self):
+        """Test dirname with simple path."""
+        result = self.shell.dirname('/usr/bin/sort')
+        assert result.text == '/usr/bin'
+
+    def test_dirname_no_directory(self):
+        """Test dirname with no directory component."""
+        result = self.shell.dirname('stdio.h')
+        assert result.text == '.'
+
+    def test_dirname_trailing_slash(self):
+        """Test dirname with trailing slash."""
+        result = self.shell.dirname('/home/user/')
+        assert result.text == '/home'
+
+
+class TestXargsCommand:
+    """Test xargs command."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.shell = DagShell()
+        self.shell.mkdir('/test')
+
+    def test_xargs_echo(self):
+        """Test xargs with echo."""
+        self.shell.echo('hello world test')
+        result = self.shell.xargs('echo')
+        assert 'hello' in result.text
+        assert 'world' in result.text
+        assert 'test' in result.text
+
+    def test_xargs_invalid_command(self):
+        """Test xargs with invalid command."""
+        self.shell.echo('a b c')
+        result = self.shell.xargs('nonexistent_command')
+        assert result.exit_code == 127
+        assert 'command not found' in result.text
+
+    def test_xargs_empty_input(self):
+        """Test xargs with empty input."""
+        self.shell._last_result = None  # Ensure no prior input
+        result = self.shell.xargs('echo')
+        assert result.text == ''
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

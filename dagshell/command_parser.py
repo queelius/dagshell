@@ -172,7 +172,25 @@ class CommandParser:
         'find': {
             'd': 'type',
             'f': 'type',
-        }
+        },
+        'cut': {
+            'd': 'delimiter',
+            'f': 'fields',
+        },
+        'ln': {
+            's': 'symbolic',
+        },
+        'diff': {
+            'u': 'unified',
+            'c': 'context',
+        },
+        'du': {
+            'h': 'human_readable',
+            's': 'summarize',
+        },
+        'chmod': {},
+        'chown': {},
+        'tr': {},
     }
 
     def __init__(self):
@@ -377,14 +395,24 @@ class CommandParser:
                         long_name = flag_mappings.get(char, char)
 
                         # Check if this flag takes a value
-                        if cmd_name in ['head', 'tail'] and char == 'n':
-                            # Special case: -n takes a value
+                        # Flags that take a value argument
+                        value_flags = {
+                            ('head', 'n'), ('tail', 'n'),
+                            ('cut', 'd'), ('cut', 'f'),
+                            ('diff', 'c'),
+                        }
+                        if (cmd_name, char) in value_flags:
+                            # This flag takes a value
                             if i + 1 < len(args) and not args[i + 1].startswith('-'):
-                                try:
-                                    flags[long_name] = int(args[i + 1])
-                                    i += 1
-                                except ValueError:
-                                    flags[long_name] = True
+                                value = args[i + 1]
+                                # Try to convert to int for numeric flags
+                                if char in ['n', 'c']:
+                                    try:
+                                        value = int(value)
+                                    except ValueError:
+                                        pass
+                                flags[long_name] = value
+                                i += 1
                             else:
                                 flags[long_name] = True
                         else:

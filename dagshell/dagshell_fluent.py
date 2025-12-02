@@ -1602,7 +1602,8 @@ class DagShell:
 
         if delete:
             # Delete mode - remove all characters in set1
-            result_text = ''.join(c for c in text if c not in set1)
+            set1_chars = self._expand_char_range(set1)
+            result_text = ''.join(c for c in text if c not in set1_chars)
         else:
             # Translate mode
             # Handle character ranges like a-z
@@ -1778,6 +1779,121 @@ class DagShell:
             output,
             exit_code=exit_code
         )
+
+    def basename(self, path: str, suffix: str = '') -> CommandResult:
+        """Strip directory and suffix from filenames.
+
+        Usage:
+            basename PATH [SUFFIX]
+
+        Options:
+            PATH                   The path to process
+            SUFFIX                 Optional suffix to remove
+
+        Examples:
+            basename /usr/bin/sort          # Output: sort
+            basename include/stdio.h .h     # Output: stdio
+            basename /home/user/            # Output: user
+
+        Returns:
+            The base name of the path.
+        """
+        # Get base name
+        result = os.path.basename(path.rstrip('/'))
+
+        # Remove suffix if specified
+        if suffix and result.endswith(suffix):
+            result = result[:-len(suffix)]
+
+        return self._make_result(result, result)
+
+    def dirname(self, path: str) -> CommandResult:
+        """Strip last component from file name.
+
+        Usage:
+            dirname PATH
+
+        Options:
+            PATH                   The path to process
+
+        Examples:
+            dirname /usr/bin/sort           # Output: /usr/bin
+            dirname stdio.h                 # Output: .
+            dirname /home/user/             # Output: /home
+
+        Returns:
+            The directory portion of the path.
+        """
+        result = os.path.dirname(path.rstrip('/'))
+        if not result:
+            result = '.'
+
+        return self._make_result(result, result)
+
+    def xargs(self, command: str, *args, max_args: int = 0) -> CommandResult:
+        """Build and execute commands from standard input.
+
+        Usage:
+            ... | xargs COMMAND [ARGS]
+
+        Options:
+            COMMAND                Command to execute
+            ARGS                   Additional arguments
+            -n N                   Use at most N arguments per command
+
+        Examples:
+            find . -name "*.txt" | xargs cat     # Cat all txt files
+            echo "a b c" | xargs mkdir           # Create directories a, b, c
+            ls | xargs -n 1 echo                 # Echo each file
+
+        Returns:
+            Combined output of all command executions.
+        """
+        # Get input from pipe
+        if not self._last_result or not self._last_result.text:
+            return self._make_result('', '')
+
+        # Split input into arguments
+        input_args = self._last_result.text.strip().split()
+
+        if not input_args:
+            return self._make_result('', '')
+
+        # Get the method to call
+        method = getattr(self, command, None)
+        if not method:
+            return self._make_result(
+                {'error': f"xargs: {command}: command not found"},
+                f"xargs: {command}: command not found",
+                exit_code=127
+            )
+
+        results = []
+        if max_args > 0:
+            # Execute in batches
+            for i in range(0, len(input_args), max_args):
+                batch = input_args[i:i + max_args]
+                try:
+                    result = method(*list(args) + batch)
+                    if isinstance(result, CommandResult):
+                        text = result.text if result.text else str(result)
+                        if text:
+                            results.append(text)
+                except Exception as e:
+                    results.append(f"xargs: {command}: {str(e)}")
+        else:
+            # Execute all at once
+            try:
+                result = method(*list(args) + input_args)
+                if isinstance(result, CommandResult):
+                    text = result.text if result.text else str(result)
+                    if text:
+                        results.append(text)
+            except Exception as e:
+                results.append(f"xargs: {command}: {str(e)}")
+
+        output = '\n'.join(results)
+        return self._make_result(results if results else '', output if output else '')
 
     # Piping and chaining support
 
@@ -2056,40 +2172,6 @@ class DagShell:
         # The fluent API doesn't track user context by default
         result = f"Switched to user: {username}"
         return CommandResult(data=username, text=result, exit_code=0)
-
-    def xargs(self, command: str, *args) -> CommandResult:
-        """Build and execute command from input."""
-        if not self._last_result:
-            result = CommandResult(data=[], text='', exit_code=0)
-            self._last_result = result
-            return result
-
-        # Get input lines
-        lines = self._last_result.lines()
-
-        # Map command to method
-        method = getattr(self, command, None)
-        if not method:
-            result = CommandResult(
-                data=None,
-                text=f"xargs: {command}: command not found",
-                exit_code=127
-            )
-            self._last_result = result
-            return result
-
-        # Execute command for each line
-        results = []
-        for line in lines:
-            if callable(method):
-                # Call with line as argument
-                res = method(line, *args)
-                if isinstance(res, CommandResult):
-                    results.append(res.data)
-
-        result = CommandResult(data=results)
-        self._last_result = result
-        return result
 
     def save(self, filename: str = 'dagshell.json') -> CommandResult:
         """Save virtual filesystem to JSON file.

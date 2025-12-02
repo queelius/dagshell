@@ -100,7 +100,12 @@ class CommandExecutor:
         """Execute a single command by calling the appropriate shell method."""
 
         # Check for help flags first
-        if '--help' in command.flags or 'h' in command.flags or 'help' in command.flags:
+        # Note: don't treat -h as help for commands that use -h for other purposes
+        commands_with_h_flag = {'du', 'ls', 'df'}  # -h means human-readable
+        is_help = '--help' in command.flags or 'help' in command.flags
+        if not is_help and 'h' in command.flags and command.name not in commands_with_h_flag:
+            is_help = True
+        if is_help:
             return self._show_command_help(command.name)
 
         # Map command name to shell method
@@ -383,7 +388,6 @@ Examples:
             'quit': lambda: CommandResult(data='', text='exit', exit_code=0),
             'help': lambda *args: self._show_help(args[0] if args else None),
             '?': lambda *args: self._show_help(args[0] if args else None),
-            'whoami': lambda: self._whoami(),
             'su': lambda *args: self._su(args[0] if args else 'root'),
             'export': lambda *args: self._export(args[0] if args else 'export'),
             'scheme': lambda *args: self._run_scheme_command(args),
@@ -502,6 +506,91 @@ Examples:
 
         elif command.name == 'mv':
             args.extend(command.args[:2])  # src, dst
+
+        elif command.name == 'ln':
+            # ln [-s] source dest
+            args.extend(command.args[:2])  # source, dest
+            if 's' in command.flags or 'symbolic' in command.flags:
+                kwargs['symbolic'] = True
+
+        elif command.name == 'chmod':
+            # chmod mode path
+            if len(command.args) >= 2:
+                args.append(command.args[0])  # mode
+                args.append(command.args[1])  # path
+
+        elif command.name == 'chown':
+            # chown owner[:group] path
+            if len(command.args) >= 2:
+                args.append(command.args[0])  # owner
+                args.append(command.args[1])  # path
+
+        elif command.name == 'diff':
+            # diff [-u] file1 file2
+            args.extend(command.args[:2])  # file1, file2
+            if 'u' in command.flags or 'unified' in command.flags:
+                kwargs['unified'] = True
+            if 'context' in command.flags:
+                kwargs['context'] = command.flags['context']
+            elif 'c' in command.flags:
+                kwargs['context'] = command.flags['c']
+
+        elif command.name == 'cut':
+            # cut -d DELIM -f FIELDS [file...]
+            if 'delimiter' in command.flags:
+                kwargs['delimiter'] = command.flags['delimiter']
+            elif 'd' in command.flags:
+                kwargs['delimiter'] = command.flags['d']
+            if 'fields' in command.flags:
+                kwargs['fields'] = command.flags['fields']
+            elif 'f' in command.flags:
+                kwargs['fields'] = command.flags['f']
+            args.extend(command.args)
+
+        elif command.name == 'tr':
+            # tr set1 set2
+            args.extend(command.args[:2])
+
+        elif command.name == 'du':
+            # du [-h] [path...]
+            if 'h' in command.flags or 'human_readable' in command.flags or 'human-readable' in command.flags:
+                kwargs['human_readable'] = True
+            args.extend(command.args)
+
+        elif command.name == 'stat':
+            # stat path
+            if command.args:
+                args.append(command.args[0])
+
+        elif command.name == 'readlink':
+            # readlink path
+            if command.args:
+                args.append(command.args[0])
+
+        elif command.name == 'id':
+            # id [username]
+            if command.args:
+                args.append(command.args[0])
+
+        elif command.name == 'basename':
+            # basename path [suffix]
+            if command.args:
+                args.append(command.args[0])
+                if len(command.args) > 1:
+                    args.append(command.args[1])
+
+        elif command.name == 'dirname':
+            # dirname path
+            if command.args:
+                args.append(command.args[0])
+
+        elif command.name == 'xargs':
+            # xargs command [args...]
+            if command.args:
+                args.append(command.args[0])  # command
+                args.extend(command.args[1:])  # additional args
+            if 'n' in command.flags:
+                kwargs['max_args'] = command.flags['n']
 
         elif command.name == 'pwd':
             pass  # No arguments
