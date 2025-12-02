@@ -26,6 +26,7 @@ class Mode(IntEnum):
     IFREG = 0o100000  # regular file
     IFDIR = 0o040000  # directory
     IFCHR = 0o020000  # character device
+    IFLNK = 0o120000  # symbolic link
 
     # Permissions
     IRUSR = 0o400  # owner read
@@ -41,6 +42,7 @@ class Mode(IntEnum):
     # Common combinations
     FILE_DEFAULT = IFREG | IRUSR | IWUSR | IRGRP | IROTH  # 0o100644
     DIR_DEFAULT = IFDIR | IRUSR | IWUSR | IXUSR | IRGRP | IXGRP | IROTH | IXOTH  # 0o040755
+    SYMLINK_DEFAULT = IFLNK | 0o777  # symlinks typically have 0o777 permissions
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,10 @@ class Node:
     def is_device(self) -> bool:
         """Check if this is a device."""
         return (self.mode & Mode.IFCHR) != 0
+
+    def is_symlink(self) -> bool:
+        """Check if this is a symbolic link."""
+        return (self.mode & Mode.IFLNK) == Mode.IFLNK
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,25 @@ class DeviceNode(Node):
         return d
 
 
+@dataclass(frozen=True)
+class SymlinkNode(Node):
+    """Symbolic link node pointing to another path."""
+    target: str = ""  # Path that the symlink points to
+
+    def __init__(self, target: str, mode: int = Mode.SYMLINK_DEFAULT,
+                 uid: int = 1000, gid: int = 1000, mtime: Optional[float] = None):
+        object.__setattr__(self, 'target', target)
+        object.__setattr__(self, 'mode', mode)
+        object.__setattr__(self, 'uid', uid)
+        object.__setattr__(self, 'gid', gid)
+        object.__setattr__(self, 'mtime', mtime or time.time())
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d['type'] = 'symlink'
+        return d
+
+
 class FileSystem:
     """
     Content-addressable virtual filesystem.
@@ -256,12 +281,52 @@ developers:x:2000:alice,bob"""
             self.nodes[node_hash] = node
         return node_hash
 
-    def _resolve_path(self, path: str) -> Optional[str]:
-        """Resolve a path to a node hash."""
+    def _resolve_path(self, path: str, follow_symlinks: bool = True,
+                      _visited: Optional[set] = None) -> Optional[str]:
+        """Resolve a path to a node hash, optionally following symlinks.
+
+        Args:
+            path: The path to resolve
+            follow_symlinks: If True, follow symlinks to their target
+            _visited: Internal set to track visited symlinks (loop detection)
+
+        Returns:
+            The hash of the resolved node, or None if not found.
+        """
         path = os.path.normpath(path)
         if path in self.deleted:
             return None
-        return self.paths.get(path)
+
+        node_hash = self.paths.get(path)
+        if not node_hash:
+            return None
+
+        if not follow_symlinks:
+            return node_hash
+
+        # Check if it's a symlink and follow it
+        node = self.nodes[node_hash]
+        if node.is_symlink():
+            # Initialize visited set for loop detection
+            if _visited is None:
+                _visited = set()
+
+            if path in _visited:
+                # Symlink loop detected
+                return None
+            _visited.add(path)
+
+            # Resolve the symlink target
+            target = node.target
+            if not target.startswith('/'):
+                # Relative symlink - resolve relative to symlink's directory
+                parent_dir = os.path.dirname(path)
+                target = os.path.normpath(os.path.join(parent_dir, target))
+
+            # Recursively resolve (might be a chain of symlinks)
+            return self._resolve_path(target, follow_symlinks=True, _visited=_visited)
+
+        return node_hash
 
     def _get_parent_path(self, path: str) -> tuple[str, str]:
         """Split path into parent directory and basename."""
@@ -357,6 +422,172 @@ developers:x:2000:alice,bob"""
         self.paths[parent_path] = new_parent_hash
         self.paths[path] = dir_hash
         self.deleted.discard(path)
+
+        return True
+
+    def symlink(self, target: str, link_path: str) -> bool:
+        """Create a symbolic link at link_path pointing to target.
+
+        Args:
+            target: The path the symlink points to (can be relative or absolute)
+            link_path: The path where the symlink will be created
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        if link_path in self.paths:
+            return False  # Link path already exists
+
+        # Get parent directory
+        parent_path, link_name = self._get_parent_path(link_path)
+        parent_hash = self._resolve_path(parent_path)
+        if not parent_hash:
+            return False
+
+        parent = self.nodes[parent_hash]
+        if not parent.is_dir():
+            return False
+
+        # Create symlink node (target is stored as-is, resolved at access time)
+        symlink_node = SymlinkNode(target)
+        symlink_hash = self._add_node(symlink_node)
+
+        # Add to parent
+        new_parent = parent.with_child(link_name, symlink_hash)
+        new_parent_hash = self._add_node(new_parent)
+
+        # Update paths
+        self.paths[parent_path] = new_parent_hash
+        self.paths[link_path] = symlink_hash
+
+        return True
+
+    def readlink(self, path: str) -> Optional[str]:
+        """Read the target of a symbolic link.
+
+        Args:
+            path: Path to the symlink
+
+        Returns:
+            The target path string, or None if not a symlink.
+        """
+        node_hash = self._resolve_path(path, follow_symlinks=False)
+        if not node_hash:
+            return None
+
+        node = self.nodes[node_hash]
+        if not node.is_symlink():
+            return None
+
+        return node.target
+
+    def chmod(self, path: str, mode: int) -> bool:
+        """Change file mode bits.
+
+        Args:
+            path: Path to file/directory
+            mode: New permission bits (e.g., 0o755)
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        node_hash = self._resolve_path(path, follow_symlinks=False)
+        if not node_hash:
+            return False
+
+        node = self.nodes[node_hash]
+
+        # Preserve file type bits, update permission bits
+        type_bits = node.mode & 0o170000  # Extract type (dir, file, symlink, etc.)
+        new_mode = type_bits | (mode & 0o7777)  # Combine with new permission bits
+
+        # Create new node with updated mode
+        if node.is_file():
+            new_node = FileNode(content=node.content, mode=new_mode,
+                               uid=node.uid, gid=node.gid, mtime=node.mtime)
+        elif node.is_dir():
+            new_node = DirNode(children=node.children, mode=new_mode,
+                              uid=node.uid, gid=node.gid, mtime=node.mtime)
+        elif node.is_symlink():
+            new_node = SymlinkNode(target=node.target, mode=new_mode,
+                                  uid=node.uid, gid=node.gid, mtime=node.mtime)
+        elif node.is_device():
+            new_node = DeviceNode(device_type=node.device_type, mode=new_mode,
+                                 uid=node.uid, gid=node.gid, mtime=node.mtime)
+        else:
+            return False
+
+        new_hash = self._add_node(new_node)
+        self.paths[path] = new_hash
+
+        # Update parent directory reference
+        parent_path, name = self._get_parent_path(path)
+        if parent_path:
+            parent_hash = self._resolve_path(parent_path)
+            if parent_hash:
+                parent = self.nodes[parent_hash]
+                if parent.is_dir():
+                    new_parent = DirNode(
+                        children={**parent.children, name: new_hash},
+                        mode=parent.mode, uid=parent.uid, gid=parent.gid, mtime=parent.mtime
+                    )
+                    new_parent_hash = self._add_node(new_parent)
+                    self.paths[parent_path] = new_parent_hash
+
+        return True
+
+    def chown(self, path: str, uid: Optional[int] = None, gid: Optional[int] = None) -> bool:
+        """Change file owner and group.
+
+        Args:
+            path: Path to file/directory
+            uid: New user ID (None to keep current)
+            gid: New group ID (None to keep current)
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        node_hash = self._resolve_path(path, follow_symlinks=False)
+        if not node_hash:
+            return False
+
+        node = self.nodes[node_hash]
+
+        new_uid = uid if uid is not None else node.uid
+        new_gid = gid if gid is not None else node.gid
+
+        # Create new node with updated ownership
+        if node.is_file():
+            new_node = FileNode(content=node.content, mode=node.mode,
+                               uid=new_uid, gid=new_gid, mtime=node.mtime)
+        elif node.is_dir():
+            new_node = DirNode(children=node.children, mode=node.mode,
+                              uid=new_uid, gid=new_gid, mtime=node.mtime)
+        elif node.is_symlink():
+            new_node = SymlinkNode(target=node.target, mode=node.mode,
+                                  uid=new_uid, gid=new_gid, mtime=node.mtime)
+        elif node.is_device():
+            new_node = DeviceNode(device_type=node.device_type, mode=node.mode,
+                                 uid=new_uid, gid=new_gid, mtime=node.mtime)
+        else:
+            return False
+
+        new_hash = self._add_node(new_node)
+        self.paths[path] = new_hash
+
+        # Update parent directory reference
+        parent_path, name = self._get_parent_path(path)
+        if parent_path:
+            parent_hash = self._resolve_path(parent_path)
+            if parent_hash:
+                parent = self.nodes[parent_hash]
+                if parent.is_dir():
+                    new_parent = DirNode(
+                        children={**parent.children, name: new_hash},
+                        mode=parent.mode, uid=parent.uid, gid=parent.gid, mtime=parent.mtime
+                    )
+                    new_parent_hash = self._add_node(new_parent)
+                    self.paths[parent_path] = new_parent_hash
 
         return True
 
@@ -826,6 +1057,8 @@ developers:x:2000:alice,bob"""
                 node = DirNode(**{k: v for k, v in node_data.items() if k != 'type'})
             elif node_type == 'device':
                 node = DeviceNode(**{k: v for k, v in node_data.items() if k != 'type'})
+            elif node_type == 'symlink':
+                node = SymlinkNode(**{k: v for k, v in node_data.items() if k != 'type'})
             else:
                 continue
 

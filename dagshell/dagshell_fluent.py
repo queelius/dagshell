@@ -312,6 +312,124 @@ class DagShell:
             self._cwd = value
         return self
 
+    def whoami(self) -> CommandResult:
+        """Print effective user name.
+
+        Usage:
+            whoami
+
+        Returns:
+            Current username.
+        """
+        user = self._env.get('USER', 'user')
+        return self._make_result(user, user)
+
+    def id(self, user: Optional[str] = None) -> CommandResult:
+        """Print user and group IDs.
+
+        Usage:
+            id [USER]
+
+        Options:
+            USER                   Username to query (default: current user)
+
+        Examples:
+            id                     # Show current user's IDs
+            id alice               # Show alice's IDs
+
+        Returns:
+            User and group ID information.
+        """
+        if user is None:
+            user = self._env.get('USER', 'user')
+
+        uid, gid = self.fs.lookup_user(user)
+        groups = self.fs.get_user_groups(user)
+
+        # Format like: uid=1000(user) gid=1000(user) groups=1000(user),2000(developers)
+        group_list = ','.join(f'{g}' for g in sorted(groups))
+        text = f'uid={uid}({user}) gid={gid} groups={group_list}'
+
+        return self._make_result({'uid': uid, 'gid': gid, 'groups': list(groups)}, text)
+
+    def stat(self, path: str) -> CommandResult:
+        """Display file status.
+
+        Usage:
+            stat FILE
+
+        Options:
+            FILE                   File or directory to examine
+
+        Examples:
+            stat /etc/passwd       # Show file information
+            stat /home             # Show directory information
+
+        Returns:
+            Detailed file status information.
+        """
+        resolved = self._resolve_path(path)
+        info = self.fs.stat(resolved)
+
+        if info is None:
+            return self._make_result(
+                None,
+                f"stat: cannot statx '{path}': No such file or directory",
+                exit_code=1
+            )
+
+        # Format output like stat command
+        file_type = info['type']
+        mode = info['mode']
+        mode_str = self._format_mode(mode)
+        size = info.get('size', 0)
+        uid = info['uid']
+        gid = info['gid']
+        mtime = info['mtime']
+
+        import datetime
+        mtime_str = datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+
+        lines = [
+            f"  File: {path}",
+            f"  Size: {size}\tType: {file_type}",
+            f"Access: ({oct(mode & 0o7777)}/{mode_str})\tUid: {uid}\tGid: {gid}",
+            f"Modify: {mtime_str}",
+        ]
+
+        return self._make_result(info, '\n'.join(lines))
+
+    def _format_mode(self, mode: int) -> str:
+        """Format mode bits as rwx string."""
+        result = ''
+
+        # File type
+        if mode & 0o170000 == 0o040000:
+            result += 'd'
+        elif mode & 0o170000 == 0o120000:
+            result += 'l'
+        elif mode & 0o170000 == 0o020000:
+            result += 'c'
+        else:
+            result += '-'
+
+        # Owner
+        result += 'r' if mode & 0o400 else '-'
+        result += 'w' if mode & 0o200 else '-'
+        result += 'x' if mode & 0o100 else '-'
+
+        # Group
+        result += 'r' if mode & 0o040 else '-'
+        result += 'w' if mode & 0o020 else '-'
+        result += 'x' if mode & 0o010 else '-'
+
+        # Other
+        result += 'r' if mode & 0o004 else '-'
+        result += 'w' if mode & 0o002 else '-'
+        result += 'x' if mode & 0o001 else '-'
+
+        return result
+
     # Navigation methods
 
     def cd(self, path: str = None) -> 'DagShell':
@@ -804,6 +922,256 @@ class DagShell:
                     self._rm_recursive(child_path)
         self.fs.rm(path)
 
+    def ln(self, target: str, link_name: str, symbolic: bool = False) -> 'DagShell':
+        """Create links between files.
+
+        Usage:
+            ln [OPTIONS] TARGET LINK_NAME
+
+        Options:
+            -s, --symbolic         Create symbolic link instead of hard link
+            TARGET                 The file/directory to link to
+            LINK_NAME              Name of the link to create
+
+        Examples:
+            ln file.txt hardlink.txt        # Create hard link
+            ln -s /etc/passwd pw            # Create symbolic link
+            ln -s ../shared data            # Relative symbolic link
+
+        Notes:
+            Hard links share the same content hash in the DAG.
+            Symbolic links store the target path and resolve at access time.
+
+        Returns:
+            Self for method chaining.
+        """
+        target_path = self._resolve_path(target)
+        link_path = self._resolve_path(link_name)
+
+        if symbolic:
+            # Create symbolic link - target is stored as-is (can be relative)
+            if not self.fs.symlink(target, link_path):
+                self._last_result = CommandResult(
+                    data=None,
+                    text=f"ln: failed to create symbolic link '{link_name}'",
+                    exit_code=1
+                )
+        else:
+            # Create hard link - both paths point to same content hash
+            target_resolved = self._resolve_path(target)
+            if not self.fs.exists(target_resolved):
+                self._last_result = CommandResult(
+                    data=None,
+                    text=f"ln: failed to access '{target}': No such file or directory",
+                    exit_code=1
+                )
+                return self
+
+            stat = self.fs.stat(target_resolved)
+            if stat and stat['type'] == 'dir':
+                self._last_result = CommandResult(
+                    data=None,
+                    text=f"ln: '{target}': hard link not allowed for directory",
+                    exit_code=1
+                )
+                return self
+
+            # Read content and write to new path (same hash = hard link in DAG)
+            content = self.fs.read(target_resolved)
+            if content is not None:
+                self.fs.write(link_path, content)
+
+        return self
+
+    def readlink(self, path: str) -> CommandResult:
+        """Print the target of a symbolic link.
+
+        Usage:
+            readlink SYMLINK
+
+        Examples:
+            readlink /usr/bin/python    # Show where symlink points
+
+        Returns:
+            The symlink target path.
+        """
+        resolved = self._resolve_path(path)
+        target = self.fs.readlink(resolved)
+
+        if target is None:
+            return self._make_result(
+                None,
+                f"readlink: {path}: Not a symbolic link",
+                exit_code=1
+            )
+
+        return self._make_result(target, target)
+
+    def chmod(self, mode: str, path: str) -> 'DagShell':
+        """Change file mode bits.
+
+        Usage:
+            chmod MODE PATH
+
+        Options:
+            MODE                   Octal mode (e.g., 755, 644) or symbolic (e.g., +x, u+w)
+            PATH                   File or directory to modify
+
+        Examples:
+            chmod 755 script.sh            # Set rwxr-xr-x
+            chmod 644 file.txt             # Set rw-r--r--
+            chmod +x script.sh             # Add execute for all
+            chmod u+w,g-w file.txt         # Symbolic mode
+
+        Returns:
+            Self for method chaining.
+        """
+        resolved = self._resolve_path(path)
+
+        # Parse mode - handle octal or symbolic
+        if mode.isdigit() or (mode.startswith('0') and mode[1:].isdigit()):
+            # Octal mode
+            new_mode = int(mode, 8)
+        else:
+            # Symbolic mode - parse +x, u+w, etc.
+            stat = self.fs.stat(resolved)
+            if not stat:
+                self._last_result = CommandResult(
+                    data=None,
+                    text=f"chmod: cannot access '{path}': No such file or directory",
+                    exit_code=1
+                )
+                return self
+
+            current_mode = stat['mode'] & 0o777
+            new_mode = self._parse_symbolic_mode(mode, current_mode)
+
+        if not self.fs.chmod(resolved, new_mode):
+            self._last_result = CommandResult(
+                data=None,
+                text=f"chmod: cannot access '{path}': No such file or directory",
+                exit_code=1
+            )
+        return self
+
+    def _parse_symbolic_mode(self, mode_str: str, current: int) -> int:
+        """Parse symbolic mode string like +x, u+w, go-r."""
+        result = current
+
+        for part in mode_str.split(','):
+            part = part.strip()
+            if not part:
+                continue
+
+            # Find operation (+, -, =)
+            op_idx = -1
+            op = None
+            for i, c in enumerate(part):
+                if c in '+-=':
+                    op_idx = i
+                    op = c
+                    break
+
+            if op is None:
+                continue
+
+            who = part[:op_idx] if op_idx > 0 else 'a'
+            perms = part[op_idx + 1:]
+
+            # Build mask for who
+            mask = 0
+            if 'u' in who or 'a' in who:
+                mask |= 0o700
+            if 'g' in who or 'a' in who:
+                mask |= 0o070
+            if 'o' in who or 'a' in who:
+                mask |= 0o007
+
+            # Build permission bits
+            perm_bits = 0
+            for p in perms:
+                if p == 'r':
+                    perm_bits |= 0o444
+                elif p == 'w':
+                    perm_bits |= 0o222
+                elif p == 'x':
+                    perm_bits |= 0o111
+
+            perm_bits &= mask
+
+            if op == '+':
+                result |= perm_bits
+            elif op == '-':
+                result &= ~perm_bits
+            elif op == '=':
+                result = (result & ~mask) | perm_bits
+
+        return result
+
+    def chown(self, owner: str, path: str) -> 'DagShell':
+        """Change file owner and group.
+
+        Usage:
+            chown OWNER[:GROUP] PATH
+
+        Options:
+            OWNER                  New owner (username or uid)
+            GROUP                  New group (groupname or gid)
+            PATH                   File or directory to modify
+
+        Examples:
+            chown alice file.txt           # Change owner to alice
+            chown alice:developers dir/    # Change owner and group
+            chown :staff file.txt          # Change group only
+            chown 1000:1000 file.txt       # Use numeric IDs
+
+        Returns:
+            Self for method chaining.
+        """
+        resolved = self._resolve_path(path)
+
+        # Parse owner:group
+        if ':' in owner:
+            user_part, group_part = owner.split(':', 1)
+        else:
+            user_part = owner
+            group_part = None
+
+        # Resolve user
+        uid = None
+        if user_part:
+            if user_part.isdigit():
+                uid = int(user_part)
+            else:
+                uid, _ = self.fs.lookup_user(user_part)
+
+        # Resolve group
+        gid = None
+        if group_part:
+            if group_part.isdigit():
+                gid = int(group_part)
+            else:
+                # Look up group in /etc/group
+                gid = self._lookup_group(group_part)
+
+        if not self.fs.chown(resolved, uid, gid):
+            self._last_result = CommandResult(
+                data=None,
+                text=f"chown: cannot access '{path}': No such file or directory",
+                exit_code=1
+            )
+        return self
+
+    def _lookup_group(self, groupname: str) -> Optional[int]:
+        """Look up group ID from /etc/group."""
+        content = self.fs.read('/etc/group')
+        if content:
+            for line in content.decode('utf-8').strip().split('\n'):
+                parts = line.split(':')
+                if len(parts) >= 3 and parts[0] == groupname:
+                    return int(parts[2])
+        return None
+
     # Text processing methods
 
     def grep(self, pattern: str, *paths: str,
@@ -1147,6 +1515,269 @@ class DagShell:
 
         self._last_result = result
         return result
+
+    def cut(self, *paths: str, delimiter: str = '\t', fields: str = '1') -> CommandResult:
+        """Remove sections from each line.
+
+        Usage:
+            cut [OPTIONS] [FILE...]
+
+        Options:
+            -d, --delimiter        Field delimiter (default: tab)
+            -f, --fields           Field numbers to extract (e.g., 1,3 or 1-3)
+
+        Examples:
+            cut -d: -f1 /etc/passwd     # Get usernames
+            cut -f2,4 data.tsv          # Get columns 2 and 4
+            echo "a:b:c" | cut -d: -f2  # Get second field
+
+        Returns:
+            Selected fields from each line.
+        """
+        # Get input lines
+        if paths:
+            lines = []
+            for p in paths:
+                resolved = self._resolve_path(p)
+                content = self.fs.read(resolved)
+                if content:
+                    lines.extend(content.decode('utf-8').splitlines())
+        elif self._last_result and self._last_result.text:
+            lines = self._last_result.text.splitlines()
+        else:
+            lines = []
+
+        # Parse field specification
+        field_indices = self._parse_field_spec(fields)
+
+        # Process each line
+        output_lines = []
+        for line in lines:
+            parts = line.split(delimiter)
+            selected = []
+            for idx in field_indices:
+                if 0 < idx <= len(parts):
+                    selected.append(parts[idx - 1])
+            output_lines.append(delimiter.join(selected))
+
+        return self._make_result(output_lines, '\n'.join(output_lines))
+
+    def _parse_field_spec(self, spec: str) -> List[int]:
+        """Parse field specification like 1,3 or 1-3."""
+        fields = []
+        for part in spec.split(','):
+            if '-' in part:
+                start, end = part.split('-', 1)
+                start = int(start) if start else 1
+                end = int(end) if end else 100
+                fields.extend(range(start, end + 1))
+            else:
+                fields.append(int(part))
+        return fields
+
+    def tr(self, set1: str, set2: str = '', delete: bool = False) -> CommandResult:
+        """Translate or delete characters.
+
+        Usage:
+            tr SET1 [SET2]
+
+        Options:
+            SET1                   Characters to translate from (or delete)
+            SET2                   Characters to translate to
+            -d, --delete           Delete characters in SET1
+
+        Examples:
+            echo "hello" | tr a-z A-Z    # Convert to uppercase
+            echo "hello" | tr -d aeiou   # Delete vowels
+            tr ' ' '_'                   # Replace spaces with underscores
+
+        Returns:
+            Translated text.
+        """
+        # Get input
+        if self._last_result and self._last_result.text:
+            text = self._last_result.text
+        else:
+            text = ''
+
+        if delete:
+            # Delete mode - remove all characters in set1
+            result_text = ''.join(c for c in text if c not in set1)
+        else:
+            # Translate mode
+            # Handle character ranges like a-z
+            set1_chars = self._expand_char_range(set1)
+            set2_chars = self._expand_char_range(set2)
+
+            # Build translation table
+            if len(set2_chars) < len(set1_chars):
+                # Extend set2 with its last char
+                set2_chars += set2_chars[-1:] * (len(set1_chars) - len(set2_chars))
+
+            trans = str.maketrans(set1_chars, set2_chars[:len(set1_chars)])
+            result_text = text.translate(trans)
+
+        return self._make_result(result_text, result_text)
+
+    def _expand_char_range(self, s: str) -> str:
+        """Expand character ranges like a-z."""
+        result = []
+        i = 0
+        while i < len(s):
+            if i + 2 < len(s) and s[i + 1] == '-':
+                # Range like a-z
+                start, end = ord(s[i]), ord(s[i + 2])
+                result.extend(chr(c) for c in range(start, end + 1))
+                i += 3
+            else:
+                result.append(s[i])
+                i += 1
+        return ''.join(result)
+
+    def du(self, *paths: str, human_readable: bool = False) -> CommandResult:
+        """Estimate file space usage.
+
+        Usage:
+            du [OPTIONS] [PATH...]
+
+        Options:
+            -h, --human-readable   Print sizes in human-readable format
+            PATH                   Paths to analyze (default: current directory)
+
+        Examples:
+            du /home               # Show usage of /home
+            du -h                  # Human-readable current directory
+
+        Returns:
+            Disk usage for each path.
+        """
+        if not paths:
+            paths = [self._cwd]
+
+        results = []
+        output_lines = []
+
+        for path in paths:
+            resolved = self._resolve_path(path)
+            size = self._calculate_size(resolved)
+
+            if human_readable:
+                size_str = self._format_size(size)
+            else:
+                size_str = str(size)
+
+            results.append({'path': path, 'size': size})
+            output_lines.append(f"{size_str}\t{path}")
+
+        return self._make_result(results, '\n'.join(output_lines))
+
+    def _calculate_size(self, path: str) -> int:
+        """Calculate total size of a path (recursive for directories)."""
+        stat = self.fs.stat(path)
+        if not stat:
+            return 0
+
+        if stat['type'] == 'file':
+            return stat.get('size', 0)
+        elif stat['type'] == 'dir':
+            total = 0
+            children = self.fs.ls(path)
+            if children:
+                for child in children:
+                    child_path = os.path.join(path, child)
+                    total += self._calculate_size(child_path)
+            return total
+        else:
+            return 0
+
+    def _format_size(self, size: int) -> str:
+        """Format size in human-readable form."""
+        for unit in ['B', 'K', 'M', 'G', 'T']:
+            if size < 1024:
+                return f"{size}{unit}"
+            size //= 1024
+        return f"{size}P"
+
+    def diff(self, file1: str, file2: str, unified: bool = False,
+             context: int = 3) -> CommandResult:
+        """Compare files line by line.
+
+        Usage:
+            diff [OPTIONS] FILE1 FILE2
+
+        Options:
+            -u, --unified          Output unified diff format
+            -c N, --context N      Number of context lines (default: 3)
+
+        Examples:
+            diff file1.txt file2.txt       # Compare two files
+            diff -u old.py new.py          # Unified diff format
+
+        Returns:
+            Differences between files, or empty if identical.
+        """
+        resolved1 = self._resolve_path(file1)
+        resolved2 = self._resolve_path(file2)
+
+        content1 = self.fs.read(resolved1)
+        content2 = self.fs.read(resolved2)
+
+        if content1 is None:
+            return self._make_result(
+                {'error': f"diff: {file1}: No such file"},
+                f"diff: {file1}: No such file",
+                exit_code=1
+            )
+        if content2 is None:
+            return self._make_result(
+                {'error': f"diff: {file2}: No such file"},
+                f"diff: {file2}: No such file",
+                exit_code=1
+            )
+
+        lines1 = content1.decode('utf-8', errors='replace').splitlines(keepends=True)
+        lines2 = content2.decode('utf-8', errors='replace').splitlines(keepends=True)
+
+        # Ensure lines end with newline for proper diff format
+        if lines1 and not lines1[-1].endswith('\n'):
+            lines1[-1] += '\n'
+        if lines2 and not lines2[-1].endswith('\n'):
+            lines2[-1] += '\n'
+
+        import difflib
+
+        if unified:
+            diff_result = list(difflib.unified_diff(
+                lines1, lines2,
+                fromfile=file1, tofile=file2,
+                n=context
+            ))
+        else:
+            # Simple diff output
+            diff_result = []
+            matcher = difflib.SequenceMatcher(None, lines1, lines2)
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'replace':
+                    for i in range(i1, i2):
+                        diff_result.append(f"< {lines1[i].rstrip()}\n")
+                    diff_result.append("---\n")
+                    for j in range(j1, j2):
+                        diff_result.append(f"> {lines2[j].rstrip()}\n")
+                elif tag == 'delete':
+                    for i in range(i1, i2):
+                        diff_result.append(f"< {lines1[i].rstrip()}\n")
+                elif tag == 'insert':
+                    for j in range(j1, j2):
+                        diff_result.append(f"> {lines2[j].rstrip()}\n")
+
+        output = ''.join(diff_result).rstrip('\n')
+        exit_code = 1 if diff_result else 0  # diff returns 1 if differences found
+
+        return self._make_result(
+            {'file1': file1, 'file2': file2, 'differences': len(diff_result) > 0},
+            output,
+            exit_code=exit_code
+        )
 
     # Piping and chaining support
 
