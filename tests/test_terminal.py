@@ -458,5 +458,180 @@ class TestTerminalSession(unittest.TestCase):
         self.assertEqual(self.session.shell._env['HOME'], "/home/testuser")
 
 
+class TestCLIMode(unittest.TestCase):
+    """Test command-line interface mode."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        import tempfile
+        self.temp_dir = tempfile.mkdtemp()
+        self.fs_file = os.path.join(self.temp_dir, 'test_fs.json')
+
+    def tearDown(self):
+        """Clean up test fixtures."""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_oneshot_ls_command(self):
+        """Test one-shot ls command."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', 'ls', '/'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('dev', result.stdout)
+        self.assertIn('etc', result.stdout)
+
+    def test_oneshot_pwd_command(self):
+        """Test one-shot pwd command."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', 'pwd'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), '/')
+
+    def test_command_mode(self):
+        """Test -c command mode."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '-c', 'mkdir /test && ls /test'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        # Empty directory listing
+        self.assertEqual(result.stdout.strip(), '')
+
+    def test_output_option(self):
+        """Test --output option."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '-o', self.fs_file,
+             '-c', 'mkdir /testdir && echo hello > /testdir/file.txt'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(os.path.exists(self.fs_file))
+
+        # Verify the file is valid JSON
+        import json
+        with open(self.fs_file, 'r') as f:
+            data = json.load(f)
+        self.assertIn('nodes', data)
+        self.assertIn('paths', data)
+
+    def test_fs_and_save_options(self):
+        """Test --fs and --save options."""
+        import subprocess
+
+        # Create initial filesystem
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '-o', self.fs_file,
+             '-c', 'mkdir /mydir'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+        # Load and modify
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '--fs', self.fs_file, '--save',
+             '-c', 'touch /mydir/newfile.txt'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+        # Verify the file was saved
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '--fs', self.fs_file,
+             'ls', '/mydir'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('newfile.txt', result.stdout)
+
+    def test_json_output(self):
+        """Test --json output option."""
+        import subprocess
+        import json
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '--json',
+             '-c', 'mkdir /jsontest'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        # Should output valid JSON
+        data = json.loads(result.stdout)
+        self.assertIn('nodes', data)
+
+    def test_directory_option(self):
+        """Test -d directory option."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '-d', '/etc', 'pwd'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), '/etc')
+
+    def test_environment_variable(self):
+        """Test DAGSHELL_FS environment variable."""
+        import subprocess
+
+        # Create a filesystem file
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '-o', self.fs_file,
+             '-c', 'mkdir /envtest && echo data > /envtest/file.txt'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+        # Use environment variable
+        env = os.environ.copy()
+        env['DAGSHELL_FS'] = self.fs_file
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', 'cat', '/envtest/file.txt'],
+            capture_output=True, text=True, env=env
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), 'data')
+
+    def test_command_not_found(self):
+        """Test command not found returns exit code 127."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', 'notarealcommand'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 127)
+        self.assertIn('command not found', result.stdout)
+
+    def test_pipeline_command(self):
+        """Test pipeline commands work in one-shot mode."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '-c',
+             'echo hello world | wc -w'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        # wc -w outputs lines and words count
+        self.assertIn('2', result.stdout)
+
+    def test_help_output(self):
+        """Test --help output."""
+        import subprocess
+        result = subprocess.run(
+            ['python', '-m', 'dagshell.terminal', '--help'],
+            capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('DagShell', result.stdout)
+        self.assertIn('--fs', result.stdout)
+        self.assertIn('--save', result.stdout)
+        self.assertIn('DAGSHELL_FS', result.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

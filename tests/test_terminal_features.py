@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Tests for the enhanced terminal module.
+Tests for terminal features.
 
 This module tests:
 - History management with persistence
 - History expansion (!!, !n, !-n)
 - Tab completion for commands and paths
 - Command aliases
-- Keyboard shortcuts simulation
 """
 
 import sys
@@ -20,9 +19,9 @@ import json
 from unittest.mock import Mock, patch, MagicMock
 import readline
 
-from dagshell.enhanced_terminal import (
-    EnhancedTerminalSession,
-    EnhancedTerminalConfig,
+from dagshell.terminal import (
+    TerminalSession,
+    TerminalConfig,
     HistoryManager,
     TabCompleter,
     AliasManager
@@ -304,7 +303,7 @@ class TestTabCompleter(unittest.TestCase):
         self.assertIn("/tmp/", matches)
 
 
-class TestEnhancedTerminalSession(unittest.TestCase):
+class TestTerminalSession(unittest.TestCase):
     """Test the enhanced terminal session."""
 
     def setUp(self):
@@ -317,14 +316,14 @@ class TestEnhancedTerminalSession(unittest.TestCase):
         self.alias_file.close()
 
         # Create config
-        self.config = EnhancedTerminalConfig(
+        self.config = TerminalConfig(
             history_file=self.history_file.name,
             alias_file=self.alias_file.name,
             history_max_size=100
         )
 
         # Create session
-        self.session = EnhancedTerminalSession(config=self.config)
+        self.session = TerminalSession(config=self.config)
 
     def tearDown(self):
         """Clean up test fixtures."""
@@ -417,11 +416,11 @@ class TestIntegration(unittest.TestCase):
 
         try:
             # Create session
-            config = EnhancedTerminalConfig(
+            config = TerminalConfig(
                 history_file=history_file.name,
                 alias_file=alias_file.name
             )
-            session = EnhancedTerminalSession(config=config)
+            session = TerminalSession(config=config)
 
             # Create some structure
             session.execute_command("mkdir /workspace")
@@ -445,7 +444,7 @@ class TestIntegration(unittest.TestCase):
             session._cleanup()
 
             # Create new session with same files
-            new_session = EnhancedTerminalSession(config=config)
+            new_session = TerminalSession(config=config)
 
             # Check alias persisted
             output = new_session.execute_command("alias")

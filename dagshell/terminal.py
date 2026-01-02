@@ -17,7 +17,13 @@ import os
 import sys
 import getpass
 import socket
-from typing import Optional, List, Dict, Any, Tuple
+import readline
+import atexit
+import signal
+import json
+import re
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -40,6 +46,289 @@ class TerminalConfig:
     history_size: int = 1000
     safe_host_directory: Optional[str] = None  # Safe directory for host file operations
     snapshots_directory: str = '.dagshell-snapshots'  # Directory for state snapshots
+    # Enhanced terminal features
+    history_file: str = field(default_factory=lambda: str(Path.home() / '.dagshell_history'))
+    history_max_size: int = 10000
+    enable_tab_completion: bool = True
+    enable_history_expansion: bool = True
+    aliases: Dict[str, str] = field(default_factory=dict)
+    alias_file: str = field(default_factory=lambda: str(Path.home() / '.dagshell_aliases'))
+
+
+class HistoryManager:
+    """
+    Manages command history with persistence and expansion.
+
+    Provides:
+    - History persistence to disk
+    - History expansion (!!, !n, !-n, !string)
+    - Integration with readline library
+    """
+
+    def __init__(self, history_file: str, max_size: int = 10000):
+        """Initialize history manager with file persistence."""
+        self.history_file = history_file
+        self.max_size = max_size
+        self.history: List[str] = []
+        self._initial_history_length = readline.get_current_history_length()
+        self._load_history()
+
+    def _load_history(self):
+        """Load history from file."""
+        try:
+            if os.path.exists(self.history_file):
+                readline.clear_history()
+                readline.read_history_file(self.history_file)
+                history_length = readline.get_current_history_length()
+                self.history = [
+                    readline.get_history_item(i)
+                    for i in range(1, history_length + 1)
+                    if readline.get_history_item(i)
+                ]
+        except (IOError, OSError, AttributeError):
+            self.history = []
+
+    def save_history(self):
+        """Save history to file."""
+        try:
+            readline.write_history_file(self.history_file)
+        except (IOError, OSError):
+            pass
+
+    def add(self, command: str):
+        """Add a command to history."""
+        if command and command.strip():
+            if not self.history or self.history[-1] != command:
+                self.history.append(command)
+                readline.add_history(command)
+                if len(self.history) > self.max_size:
+                    self.history = self.history[-self.max_size:]
+
+    def get(self, index: int) -> Optional[str]:
+        """Get command at specific index (1-based like bash)."""
+        if 0 < index <= len(self.history):
+            return self.history[index - 1]
+        return None
+
+    def get_last(self) -> Optional[str]:
+        """Get the last command."""
+        return self.history[-1] if self.history else None
+
+    def search(self, pattern: str) -> List[Tuple[int, str]]:
+        """Search history for commands containing pattern."""
+        results = []
+        for i, cmd in enumerate(self.history, 1):
+            if pattern in cmd:
+                results.append((i, cmd))
+        return results
+
+    def expand(self, command: str) -> str:
+        """
+        Expand history references in command.
+
+        Supports: !! (last), !n (number), !-n (relative), !string (prefix)
+        """
+        if not command or '!' not in command:
+            return command
+
+        # Handle !! (last command)
+        if '!!' in command:
+            last_cmd = self.get_last()
+            if last_cmd:
+                command = command.replace('!!', last_cmd)
+            else:
+                raise ValueError("!!: event not found")
+
+        # Handle !n and !-n
+        pattern = r'!(-?\d+)'
+        matches = re.findall(pattern, command)
+        for match in matches:
+            index = int(match)
+            if index < 0:
+                index = len(self.history) + index + 1
+            expanded = self.get(index)
+            if expanded:
+                command = command.replace(f'!{match}', expanded)
+            else:
+                raise ValueError(f"!{match}: event not found")
+
+        # Handle !string (most recent command starting with string)
+        pattern = r'!([a-zA-Z]\w*)'
+        matches = re.findall(pattern, command)
+        for match in matches:
+            for cmd in reversed(self.history):
+                if cmd.startswith(match):
+                    command = command.replace(f'!{match}', cmd)
+                    break
+            else:
+                raise ValueError(f"!{match}: event not found")
+
+        return command
+
+    def display(self, max_entries: Optional[int] = None) -> str:
+        """Format history for display."""
+        entries = self.history if max_entries is None else self.history[-max_entries:]
+        lines = []
+        start_index = len(self.history) - len(entries) + 1
+        for i, cmd in enumerate(entries, start_index):
+            lines.append(f"{i:5d}  {cmd}")
+        return '\n'.join(lines)
+
+
+class AliasManager:
+    """
+    Manages command aliases with persistence.
+    """
+
+    def __init__(self, alias_file: str):
+        """Initialize alias manager."""
+        self.alias_file = alias_file
+        self.aliases: Dict[str, str] = {}
+        self._load_aliases()
+
+    def _load_aliases(self):
+        """Load aliases from file."""
+        try:
+            if os.path.exists(self.alias_file):
+                with open(self.alias_file, 'r') as f:
+                    self.aliases = json.load(f)
+        except (IOError, json.JSONDecodeError):
+            pass
+
+    def save_aliases(self):
+        """Save aliases to file."""
+        try:
+            with open(self.alias_file, 'w') as f:
+                json.dump(self.aliases, f, indent=2)
+        except IOError:
+            pass
+
+    def add(self, name: str, command: str):
+        """Add an alias."""
+        self.aliases[name] = command
+        self.save_aliases()
+
+    def remove(self, name: str) -> bool:
+        """Remove an alias. Returns True if removed."""
+        if name in self.aliases:
+            del self.aliases[name]
+            self.save_aliases()
+            return True
+        return False
+
+    def expand(self, command_line: str) -> str:
+        """Expand aliases in command line."""
+        parts = command_line.split(None, 1)
+        if not parts:
+            return command_line
+        first_word = parts[0]
+        if first_word in self.aliases:
+            expanded = self.aliases[first_word]
+            if len(parts) > 1:
+                return expanded + ' ' + parts[1]
+            else:
+                return expanded
+        return command_line
+
+    def list_aliases(self) -> str:
+        """Format aliases for display."""
+        if not self.aliases:
+            return "No aliases defined"
+        lines = []
+        for name, command in sorted(self.aliases.items()):
+            lines.append(f"alias {name}='{command}'")
+        return '\n'.join(lines)
+
+
+class TabCompleter:
+    """
+    Provides tab completion for commands and file paths.
+    """
+
+    def __init__(self, shell: DagShell, aliases: Dict[str, str]):
+        """Initialize tab completer."""
+        self.shell = shell
+        self.aliases = aliases
+        self._command_cache = self._build_command_cache()
+
+    def _build_command_cache(self) -> List[str]:
+        """Build cache of available commands."""
+        commands = []
+        for attr_name in dir(self.shell):
+            if not attr_name.startswith('_'):
+                attr = getattr(self.shell, attr_name)
+                if callable(attr):
+                    commands.append(attr_name)
+        commands.extend(['help', 'clear', 'exit', 'quit', 'history', 'alias', 'unalias'])
+        commands.extend(self.aliases.keys())
+        return sorted(set(commands))
+
+    def complete(self, text: str, state: int) -> Optional[str]:
+        """Readline completion function."""
+        line = readline.get_line_buffer()
+        begin = readline.get_begidx()
+
+        if begin == 0:
+            matches = self._complete_command(text)
+        else:
+            matches = self._complete_path(text, line)
+
+        try:
+            return matches[state]
+        except IndexError:
+            return None
+
+    def _complete_command(self, text: str) -> List[str]:
+        """Complete command names."""
+        if not text:
+            return self._command_cache
+        return [cmd for cmd in self._command_cache if cmd.startswith(text)]
+
+    def _complete_path(self, text: str, line: str) -> List[str]:
+        """Complete file paths in the virtual filesystem."""
+        if text.startswith('/'):
+            dir_path = os.path.dirname(text) or '/'
+            prefix = os.path.basename(text)
+        else:
+            if '/' in text:
+                dir_path = os.path.dirname(text)
+                prefix = os.path.basename(text)
+            else:
+                dir_path = '.'
+                prefix = text
+
+        matches = []
+        current_dir = self.shell._cwd
+        if dir_path == '.':
+            search_dir = current_dir
+        elif dir_path.startswith('/'):
+            search_dir = dir_path
+        else:
+            search_dir = os.path.join(current_dir, dir_path)
+
+        try:
+            result = self.shell.cd(search_dir).ls()
+            if result and result.data:
+                entries = result.data if isinstance(result.data, list) else result.text.strip().split('\n')
+                for entry_name in entries:
+                    if not entry_name or entry_name in ['.', '..']:
+                        continue
+                    if entry_name.startswith(prefix):
+                        if text.startswith('/'):
+                            full_path = os.path.join(dir_path, entry_name)
+                        elif '/' in text:
+                            full_path = os.path.join(dir_path, entry_name)
+                        else:
+                            full_path = entry_name
+                        entry_full_path = os.path.join(search_dir, entry_name)
+                        if self.shell.fs.stat(entry_full_path) and self.shell.fs.stat(entry_full_path).get('type') == 'dir':
+                            full_path += '/'
+                        matches.append(full_path)
+            self.shell.cd(current_dir)
+        except:
+            pass
+
+        return sorted(matches)
 
 
 class CommandExecutor:
@@ -730,13 +1019,21 @@ class TerminalSession:
 
     This class provides the REPL loop and manages the terminal session,
     including prompt display, command execution, and session state.
+    Features include readline integration, history expansion, tab completion,
+    and command aliases.
     """
 
     def __init__(self, config: Optional[TerminalConfig] = None,
-                 shell: Optional[DagShell] = None):
+                 shell: Optional[DagShell] = None,
+                 fs: Optional['FileSystem'] = None):
         """Initialize terminal session."""
         self.config = config or TerminalConfig()
-        self.shell = shell or DagShell()
+        if shell:
+            self.shell = shell
+        elif fs:
+            self.shell = DagShell(fs=fs)
+        else:
+            self.shell = DagShell()
         self.parser = CommandParser()
         self.executor = CommandExecutor(self.shell)
         self.history = CommandHistory(self.config.history_size)
@@ -748,8 +1045,33 @@ class TerminalSession:
         self.groups = self.shell.fs.get_user_groups(self.current_user)
         self.strict_permissions = False  # Can be enabled for permission checking
 
+        # Enhanced terminal components
+        self.history_manager = HistoryManager(
+            self.config.history_file,
+            self.config.history_max_size
+        )
+        self.alias_manager = AliasManager(self.config.alias_file)
+
+        # Setup readline and register cleanup
+        self._setup_readline()
+        atexit.register(self._cleanup)
+
         # Initialize shell environment
         self._init_environment()
+
+    def _setup_readline(self):
+        """Configure readline for terminal."""
+        if self.config.enable_tab_completion:
+            self.tab_completer = TabCompleter(self.shell, self.alias_manager.aliases)
+            readline.set_completer(self.tab_completer.complete)
+            readline.parse_and_bind('tab: complete')
+        readline.parse_and_bind('set editing-mode emacs')
+        readline.set_history_length(self.config.history_max_size)
+
+    def _cleanup(self):
+        """Clean up on exit."""
+        self.history_manager.save_history()
+        self.alias_manager.save_aliases()
 
     def _init_environment(self):
         """Initialize the shell environment."""
@@ -1172,8 +1494,44 @@ Note: Host file operations require safe_host_directory to be configured."""
 
     def _slash_aliases(self, args: List[str]) -> str:
         """List command aliases."""
-        # TODO: Implement alias system
-        return "Alias system not yet implemented"
+        return self.alias_manager.list_aliases()
+
+    def _handle_alias_command(self, command_line: str) -> str:
+        """Handle alias creation command."""
+        parts = command_line.split(None, 1)
+        if len(parts) < 2:
+            return "alias: usage: alias name=command"
+        alias_def = parts[1]
+        if '=' not in alias_def:
+            return "alias: usage: alias name=command"
+        name, command = alias_def.split('=', 1)
+        name = name.strip()
+        command = command.strip()
+        # Remove quotes if present
+        if command.startswith('"') and command.endswith('"'):
+            command = command[1:-1]
+        elif command.startswith("'") and command.endswith("'"):
+            command = command[1:-1]
+        self.alias_manager.add(name, command)
+        # Update tab completer
+        if hasattr(self, 'tab_completer'):
+            self.tab_completer.aliases = self.alias_manager.aliases
+            self.tab_completer._command_cache = self.tab_completer._build_command_cache()
+        return f"alias {name}='{command}'"
+
+    def _handle_unalias_command(self, command_line: str) -> str:
+        """Handle alias removal command."""
+        parts = command_line.split()
+        if len(parts) < 2:
+            return "unalias: usage: unalias name"
+        name = parts[1]
+        if self.alias_manager.remove(name):
+            if hasattr(self, 'tab_completer'):
+                self.tab_completer.aliases = self.alias_manager.aliases
+                self.tab_completer._command_cache = self.tab_completer._build_command_cache()
+            return ''
+        else:
+            return f"unalias: {name}: not found"
 
     def get_prompt(self) -> str:
         """Generate the command prompt."""
@@ -1207,10 +1565,49 @@ Note: Host file operations require safe_host_directory to be configured."""
         Execute a command line and return the output.
 
         Returns None for exit commands.
+        Includes history expansion and alias support.
         """
         # Handle empty input
         if not command_line or command_line.strip() == '':
             return ''
+
+        # Handle clear command
+        if command_line.strip() == 'clear':
+            os.system('clear' if os.name != 'nt' else 'cls')
+            return ''
+
+        # Handle history command
+        if command_line.strip() == 'history':
+            return self.history_manager.display()
+        elif command_line.strip().startswith('history '):
+            parts = command_line.split()
+            if len(parts) > 1 and parts[1].isdigit():
+                return self.history_manager.display(int(parts[1]))
+            return self.history_manager.display()
+
+        # Handle alias commands
+        if command_line.strip() == 'alias':
+            return self.alias_manager.list_aliases()
+        elif command_line.strip().startswith('alias '):
+            return self._handle_alias_command(command_line)
+        elif command_line.strip().startswith('unalias '):
+            return self._handle_unalias_command(command_line)
+
+        # Store original for history
+        original_command = command_line
+
+        # Expand history references
+        if self.config.enable_history_expansion:
+            try:
+                expanded = self.history_manager.expand(command_line)
+                if expanded != command_line:
+                    print(expanded)
+                    command_line = expanded
+            except ValueError as e:
+                return str(e)
+
+        # Expand aliases
+        command_line = self.alias_manager.expand(command_line)
 
         # Check for slash commands first
         if command_line.strip().startswith('/'):
@@ -1243,26 +1640,32 @@ Note: Host file operations require safe_host_directory to be configured."""
         # Execute the command normally
         result = self.executor.execute(command_group)
 
+        # Add to history after successful execution (but not history expansion commands)
+        if result is not None and not original_command.startswith('!'):
+            self.history_manager.add(original_command)
+
         # Return the text output
         return result.text if result.text else str(result)
 
     def run_interactive(self):
-        """Run the interactive REPL loop."""
+        """Run the interactive REPL loop with readline support."""
         self.running = True
 
         # Print welcome message
-        print("Welcome to dagshell terminal emulator")
-        print("Type 'help' for help, '/help' for slash commands, 'exit' to quit")
+        print("Welcome to DagShell Terminal")
+        print("Features: History (↑/↓), Tab completion, Aliases, History expansion (!!, !n)")
+        print("Type 'help' for commands, '/help' for slash commands, 'exit' to quit")
         print()
 
         while self.running:
             try:
-                # Display prompt and get input
+                # Display prompt and get input (readline handles history navigation)
                 prompt = self.get_prompt()
                 command_line = input(prompt)
 
-                # Add to history
-                self.history.add(command_line)
+                # Add to history manager
+                self.history_manager.add(command_line)
+                self.history.add(command_line)  # Keep legacy history too
 
                 # Execute command
                 output = self.execute_command(command_line)
@@ -1284,6 +1687,8 @@ Note: Host file operations require safe_host_directory to be configured."""
             except Exception as e:
                 print(f"Error: {e}")
 
+        # Clean up
+        self._cleanup()
         print("Goodbye!")
 
     def run_command(self, command_line: str) -> str:
@@ -1315,65 +1720,150 @@ Note: Host file operations require safe_host_directory to be configured."""
 
 
 def main():
-    """Main entry point for terminal emulator."""
+    """Main entry point for terminal emulator.
+
+    Supports three modes:
+    1. Interactive mode (default): Full shell session
+    2. Command mode (-c): Execute a single command string
+    3. One-shot mode: Execute command from positional arguments
+
+    Examples:
+        dagshell                           # Interactive mode
+        dagshell -i                        # Explicit interactive mode
+        dagshell -c "ls -la /home"         # Command mode
+        dagshell ls -la /home              # One-shot mode
+        dagshell --fs project.json ls /    # With filesystem file
+        dagshell --fs project.json --save mkdir /new  # Save after write
+    """
     import argparse
 
-    parser = argparse.ArgumentParser(description='DagShell Terminal Emulator')
-    parser.add_argument('-c', '--command', help='Execute command and exit')
+    parser = argparse.ArgumentParser(
+        description='DagShell - Virtual POSIX filesystem with content-addressable DAG structure',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  dagshell                              Start interactive shell
+  dagshell ls -la /home                 One-shot command
+  dagshell --fs project.json ls /       Use filesystem from file
+  dagshell --fs project.json --save mkdir /new
+                                        Save changes back to file
+  dagshell -c "mkdir /a && touch /a/b"  Execute command string
+
+Environment:
+  DAGSHELL_FS    Default filesystem file (overridden by --fs)
+'''
+    )
+
+    # Filesystem options
+    parser.add_argument('--fs', metavar='FILE',
+                        help='Load filesystem from JSON file (default: $DAGSHELL_FS or empty)')
+    parser.add_argument('--save', '-s', action='store_true',
+                        help='Save filesystem back to source file after execution')
+    parser.add_argument('-o', '--output', metavar='FILE',
+                        help='Save filesystem to FILE after execution')
+    parser.add_argument('--json', action='store_true',
+                        help='Output filesystem as JSON to stdout (for pipelines)')
+
+    # Execution mode
+    parser.add_argument('-c', '--command', metavar='CMD',
+                        help='Execute command string and exit')
+    parser.add_argument('-i', '--interactive', action='store_true',
+                        help='Force interactive mode even with --fs')
+
+    # Session options
     parser.add_argument('-u', '--user', help='Set username', default=getpass.getuser())
     parser.add_argument('-d', '--directory', help='Set initial directory', default='/')
-    parser.add_argument('--enhanced', action='store_true', help='Use enhanced terminal with readline support')
-    parser.add_argument('--no-history', action='store_true', help='Disable history (enhanced mode only)')
-    parser.add_argument('--no-completion', action='store_true', help='Disable tab completion (enhanced mode only)')
+    parser.add_argument('--no-history', action='store_true',
+                        help='Disable history expansion')
+    parser.add_argument('--no-completion', action='store_true',
+                        help='Disable tab completion')
+
+    # Positional arguments for one-shot mode
+    parser.add_argument('args', nargs='*', help='Command and arguments for one-shot mode')
+
     args = parser.parse_args()
 
-    # Use enhanced terminal if requested or if readline is available
-    use_enhanced = args.enhanced
-    if not use_enhanced:
-        # Try to use enhanced by default if readline is available
+    # Determine filesystem source
+    fs_file = args.fs or os.environ.get('DAGSHELL_FS')
+
+    # Determine execution mode
+    has_oneshot_cmd = len(args.args) > 0
+    has_command_str = args.command is not None
+    force_interactive = args.interactive
+
+    # Create filesystem
+    from .dagshell import FileSystem
+    if fs_file and os.path.exists(fs_file):
         try:
-            import readline
-            use_enhanced = True
-        except ImportError:
-            use_enhanced = False
-
-    if use_enhanced:
-        try:
-            from .enhanced_terminal import EnhancedTerminalSession, EnhancedTerminalConfig
-
-            # Create enhanced configuration
-            config = EnhancedTerminalConfig(
-                user=args.user,
-                initial_dir=args.directory,
-                enable_tab_completion=not args.no_completion,
-                enable_history_expansion=not args.no_history
-            )
-
-            # Create enhanced session
-            session = EnhancedTerminalSession(config=config)
-
-        except ImportError:
-            # Fall back to regular terminal
-            config = TerminalConfig(
-                user=args.user,
-                initial_dir=args.directory
-            )
-            session = TerminalSession(config=config)
+            with open(fs_file, 'r') as f:
+                fs = FileSystem.from_json(f.read())
+        except Exception as e:
+            print(f"dagshell: error loading {fs_file}: {e}", file=sys.stderr)
+            sys.exit(1)
     else:
-        # Use regular terminal
+        fs = FileSystem()
+
+    # Create shell with loaded filesystem
+    from .dagshell_fluent import DagShell
+    shell = DagShell(fs=fs)
+    shell.cd(args.directory)
+
+    # One-shot or command mode
+    if has_oneshot_cmd or has_command_str:
+        # Build command string
+        if has_command_str:
+            cmd_str = args.command
+        else:
+            # Join positional args, preserving quotes for args with spaces
+            cmd_str = ' '.join(args.args)
+
+        # Execute command
+        executor = CommandExecutor(shell)
+        parser_obj = CommandParser()
+
+        try:
+            parsed = parser_obj.parse(cmd_str)
+            result = executor.execute(parsed)
+
+            # Output result
+            if args.json:
+                # Output filesystem as JSON
+                print(shell.fs.to_json())
+            elif result and result.text:
+                print(result.text)
+
+            # Handle save options
+            if args.save and fs_file:
+                with open(fs_file, 'w') as f:
+                    f.write(shell.fs.to_json())
+            if args.output:
+                with open(args.output, 'w') as f:
+                    f.write(shell.fs.to_json())
+
+            sys.exit(result.exit_code if result else 0)
+
+        except Exception as e:
+            print(f"dagshell: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Interactive mode
+    else:
         config = TerminalConfig(
             user=args.user,
-            initial_dir=args.directory
+            initial_dir=args.directory,
+            enable_tab_completion=not args.no_completion,
+            enable_history_expansion=not args.no_history
         )
-        session = TerminalSession(config=config)
-
-    # Run command or interactive session
-    if args.command:
-        output = session.run_command(args.command)
-        if output:
-            print(output)
-    else:
+        session = TerminalSession(config=config, fs=fs)
         session.run_interactive()
+
+        # Save after interactive session if requested
+        if args.save and fs_file:
+            with open(fs_file, 'w') as f:
+                f.write(session.shell.fs.to_json())
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(session.shell.fs.to_json())
 
 
 if __name__ == '__main__':

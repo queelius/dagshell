@@ -39,7 +39,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Filesystems",
 ]
-dependencies = []
+dependencies = [
+    "pyreadline3; sys_platform == 'win32'"
+]
 
 [project.optional-dependencies]
 dev = [

@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-DagShell is a virtual POSIX filesystem with content-addressable DAG structure. It provides three primary interfaces:
+DagShell is a virtual POSIX filesystem with content-addressable DAG structure. It provides four primary interfaces:
 1. **Core Filesystem** (`dagshell.py`) - Immutable, content-addressed nodes (FileNode, DirNode, DeviceNode)
 2. **Fluent API** (`dagshell_fluent.py`) - Chainable Python interface with method chaining and piping
-3. **Terminal Emulator** (`terminal.py`) - Full shell interface translating commands to fluent API calls
+3. **Terminal Emulator** (`terminal.py`) - Full shell with interactive, command, and one-shot modes
 4. **Scheme Interpreter** (`scheme_interpreter.py`) - Embedded Scheme DSL for filesystem operations
 
 ## Development Commands
@@ -51,15 +51,25 @@ mypy dagshell/
 
 ### Running the Terminal
 ```bash
-# Start interactive terminal
+# Interactive mode
+dagshell
 python -m dagshell.terminal
-# or
-dagshell  # if installed via pip
 
-# Run demo scripts
-python examples/demo.py
-python examples/demo_terminal.py
-python examples/demo_fluent.py
+# One-shot mode (execute single command)
+dagshell ls -la /home
+dagshell pwd
+
+# Command mode (execute command string)
+dagshell -c "mkdir /a && touch /a/b"
+
+# With filesystem persistence
+dagshell --fs project.json ls /           # Load from file
+dagshell --fs project.json --save mkdir /new  # Save changes back
+dagshell -o output.json -c "mkdir /test"  # Save to specific file
+
+# Environment variable for default filesystem
+export DAGSHELL_FS=project.json
+dagshell cat /data/file.txt
 ```
 
 ## Architecture
@@ -85,9 +95,14 @@ python examples/demo_fluent.py
 - **Import/Export**: `import_file()` and `export_file()` for real filesystem interaction.
 
 ### Terminal Emulator (terminal.py)
-- **TerminalSession**: Main session manager with shell instance and command history.
+- **TerminalSession**: Main session with readline, tab completion, history expansion, and aliases.
+- **HistoryManager**: Persistent command history with expansion (`!!`, `!n`, `!-n`, `!prefix`).
+- **AliasManager**: Command aliases with JSON persistence.
+- **TabCompleter**: Readline-based completion for commands and paths.
 - **CommandExecutor**: Translates parsed Command objects to fluent API method calls.
 - **CommandParser** (command_parser.py): Parses shell syntax into structured Command/Pipeline/CommandGroup objects.
+- **CLI Modes**: Interactive (REPL), command (-c), and one-shot (positional args).
+- **Persistence**: `--fs` loads from JSON, `--save` writes back, `-o` specifies output file.
 - **Data Flow**: Raw command string → CommandParser → Command objects → CommandExecutor → Fluent API calls → CommandResult
 
 ### Scheme Interpreter (scheme_interpreter.py)
@@ -115,15 +130,15 @@ python examples/demo_fluent.py
 4. **Testability**:
    - Pure functions where possible
    - Clear interfaces between components
-   - Comprehensive test suite with 77% coverage (583 tests)
+   - Comprehensive test suite with 836 tests
 
 ## Testing Strategy
 
-- **Comprehensive Test Coverage**: Target is 99%+ coverage
+- **Comprehensive Test Coverage**: Target is high coverage across all modules
 - **Test Organization**:
   - Core filesystem: `test_dagshell.py`, `test_core_filesystem_comprehensive.py`
   - Fluent API: `test_fluent.py`
-  - Terminal: `test_terminal.py`, `test_terminal_features_comprehensive.py`
+  - Terminal: `test_terminal.py`, `test_terminal_features.py`, `test_terminal_advanced.py`
   - Scheme: `test_scheme_interpreter.py`, `test_scheme_integration_comprehensive.py`
   - Integration: `test_integration.py`
   - Edge cases: `test_edge_cases_comprehensive.py`
@@ -134,9 +149,10 @@ python examples/demo_fluent.py
 
 ### Adding a New Command
 1. Add method to `DagShell` class in `dagshell_fluent.py`
-2. Add execution logic in `CommandExecutor._execute_command()` in `terminal.py`
-3. Add tests in appropriate test file
-4. Update help system if user-facing
+2. Add flag mappings in `CommandParser.FLAG_MAPPINGS` in `command_parser.py` if needed
+3. Add execution logic in `CommandExecutor._execute_command()` in `terminal.py`
+4. Add tests in appropriate test file
+5. Update help system if user-facing
 
 ### Working with the Filesystem
 ```python
@@ -171,7 +187,7 @@ def new_command(self, arg1, arg2):
 
 ## Important Notes
 
-- **No External Dependencies**: Core package has zero dependencies (only dev dependencies)
+- **Minimal Dependencies**: Only `pyreadline3` on Windows (readline is built-in on Linux/macOS)
 - **Python 3.8+**: Minimum supported version
 - **Virtual Devices**: /dev/null, /dev/random, /dev/zero are implemented as DeviceNode with special behavior
 - **Permissions**: Unix-style permissions (mode bits) are enforced via `can_read()`, `can_write()`, `can_execute()`
