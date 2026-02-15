@@ -311,18 +311,12 @@ class TestSaveLoadErrorHandling:
             assert True
 
     def test_save_invalid_path(self, shell):
-        """Test save to invalid path."""
+        """Test save to invalid path returns error."""
         shell.echo('test').out('/test.txt')
 
-        # Try to save to invalid path
-        # The save function raises FileNotFoundError for invalid paths
-        try:
-            result = shell.save('/nonexistent/directory/save.json')
-            # Should not reach here
-            assert False, "Expected FileNotFoundError"
-        except FileNotFoundError:
-            # Expected behavior for invalid paths
-            assert True
+        # save() should handle errors gracefully and return exit_code=1
+        result = shell.save('/nonexistent/directory/save.json')
+        assert result.exit_code == 1
 
     def test_load_nonexistent_file(self, shell):
         """Test load from nonexistent file."""

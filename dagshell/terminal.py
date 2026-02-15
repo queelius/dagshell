@@ -13,19 +13,19 @@ Design Principles:
 - Composable command execution
 """
 
-import os
-import sys
-import getpass
-import socket
-import readline
 import atexit
-import signal
+import builtins
+import getpass
 import json
+import os
 import re
-from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, Callable
+import readline
+import socket
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple, Callable
 
 from .command_parser import (
     CommandParser, Command, Pipeline, CommandGroup,
@@ -325,7 +325,7 @@ class TabCompleter:
                             full_path += '/'
                         matches.append(full_path)
             self.shell.cd(current_dir)
-        except:
+        except (AttributeError, KeyError, TypeError):
             pass
 
         return sorted(matches)
@@ -741,17 +741,6 @@ Examples:
             if command.args:
                 args.append(command.args[0])  # pattern
                 args.extend(command.args[1:])  # files
-            kwargs.update(command.flags)
-
-        elif command.name in ['head', 'tail']:
-            # Handle -n flag
-            if 'lines' in command.flags:
-                args.append(command.flags['lines'])
-                del command.flags['lines']
-            elif 'n' in command.flags:
-                args.append(command.flags['n'])
-                del command.flags['n']
-            args.extend(command.args)
             kwargs.update(command.flags)
 
         elif command.name == 'wc':
@@ -1239,7 +1228,6 @@ class TerminalSession:
                 filepath = filename
 
             # Save state
-            import builtins
             with builtins.open(filepath, 'w') as f:
                 f.write(self.shell.fs.to_json())
 
@@ -1262,7 +1250,6 @@ class TerminalSession:
                 filepath = filename
 
             # Load state
-            import builtins
             with builtins.open(filepath, 'r') as f:
                 json_str = f.read()
 
@@ -1291,7 +1278,6 @@ class TerminalSession:
             filepath = os.path.join(snapshots_dir, filename)
 
             # Save snapshot
-            import builtins
             with builtins.open(filepath, 'w') as f:
                 f.write(self.shell.fs.to_json())
 
@@ -1308,7 +1294,6 @@ class TerminalSession:
                 return "No snapshots found"
 
             # List snapshot files
-            import builtins
             snapshots = []
             for filename in os.listdir(snapshots_dir):
                 if filename.endswith('.json'):
@@ -1452,7 +1437,7 @@ class TerminalSession:
             try:
                 preview_str = preview.decode('utf-8', errors='replace')
                 lines.append(f"  Preview:     {repr(preview_str)}")
-            except:
+            except (UnicodeDecodeError, AttributeError):
                 lines.append(f"  Preview:     (binary data)")
 
         # Show paths
@@ -1573,7 +1558,7 @@ Note: Host file operations require safe_host_directory to be configured."""
 
         # Handle clear command
         if command_line.strip() == 'clear':
-            os.system('clear' if os.name != 'nt' else 'cls')
+            print('\033[2J\033[H', end='')
             return ''
 
         # Handle history command
@@ -1663,11 +1648,7 @@ Note: Host file operations require safe_host_directory to be configured."""
                 prompt = self.get_prompt()
                 command_line = input(prompt)
 
-                # Add to history manager
-                self.history_manager.add(command_line)
-                self.history.add(command_line)  # Keep legacy history too
-
-                # Execute command
+                # Execute command (history recording handled in execute_command)
                 output = self.execute_command(command_line)
 
                 # Check for exit

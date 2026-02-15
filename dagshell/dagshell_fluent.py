@@ -318,6 +318,9 @@ class DagShell:
         Usage:
             whoami
 
+        Examples:
+            whoami                 # Show current username
+
         Returns:
             Current username.
         """
@@ -623,15 +626,15 @@ class DagShell:
                 files = [f for f in files if not f.startswith('.')]
 
         if long:
-            # Detailed listing (simplified for now)
+            # Detailed listing with actual permissions
             detailed = []
             for f in files:
                 full_path = os.path.join(target_path, f)
                 fstat = self.fs.stat(full_path)
                 if fstat:
-                    type_char = 'd' if fstat['type'] == 'dir' else '-'
+                    mode_str = self._format_mode(fstat.get('mode', 0o100644))
                     size = fstat.get('size', 0)
-                    detailed.append(f"{type_char}rw-r--r--  1 user user {size:8} {f}")
+                    detailed.append(f"{mode_str}  1 user user {size:8} {f}")
             result = CommandResult(data=files, text='\n'.join(detailed))
         else:
             result = CommandResult(data=files, text='\n'.join(files))
@@ -1196,8 +1199,6 @@ class DagShell:
         Returns:
             Lines matching the pattern.
         """
-        import re
-
         # Prepare regex
         flags = re.IGNORECASE if ignore_case else 0
         try:
@@ -2033,7 +2034,6 @@ class DagShell:
             Status message.
         """
         try:
-            import json
             # Get JSON representation
             json_data = self.fs.to_json()
 
@@ -2065,7 +2065,6 @@ class DagShell:
             Status message.
         """
         try:
-            import json
             # Read from real file
             with open(filename, 'r') as f:
                 json_data = f.read()
@@ -2131,26 +2130,6 @@ class DagShell:
             error = f"Export failed: {e}"
             return CommandResult(data=error, text=error, exit_code=1)
 
-    def whoami(self) -> CommandResult:
-        """Print effective username.
-
-        Usage:
-            whoami
-
-        Options:
-            None
-
-        Examples:
-            whoami                 # Show current username
-
-        Returns:
-            Current username.
-        """
-        # For now, return a default user
-        # This will be overridden by terminal session
-        username = "user"
-        return CommandResult(data=username, text=username, exit_code=0)
-
     def su(self, username: str = 'root') -> CommandResult:
         """Switch user account.
 
@@ -2172,86 +2151,6 @@ class DagShell:
         # The fluent API doesn't track user context by default
         result = f"Switched to user: {username}"
         return CommandResult(data=username, text=result, exit_code=0)
-
-    def save(self, filename: str = 'dagshell.json') -> CommandResult:
-        """Save virtual filesystem to JSON file.
-
-        Usage:
-            save [FILENAME]
-
-        Options:
-            FILENAME               File to save to (default: dagshell.json)
-
-        Examples:
-            save                   # Save to dagshell.json
-            save backup.json       # Save to backup.json
-
-        Returns:
-            Status message.
-        """
-        # Get filesystem state as JSON
-        json_data = self.fs.to_json()
-
-        # Write to real filesystem
-        with open(filename, 'w') as f:
-            f.write(json_data)
-
-        result = f"Filesystem saved to {filename}"
-        return CommandResult(data=json_data, text=result, exit_code=0)
-
-    def load(self, filename: str = 'dagshell.json') -> CommandResult:
-        """Load virtual filesystem from JSON file.
-
-        Usage:
-            load [FILENAME]
-
-        Options:
-            FILENAME               File to load from (default: dagshell.json)
-
-        Examples:
-            load                   # Load from dagshell.json
-            load backup.json       # Load from backup.json
-
-        Returns:
-            Status message.
-        """
-        try:
-            # Read from real filesystem
-            with open(filename, 'r') as f:
-                json_data = f.read()
-
-            # Create new filesystem from JSON
-            self.fs = dagshell.FileSystem.from_json(json_data)
-
-            # Reset working directory
-            self._cwd = '/'
-
-            result = f"Filesystem loaded from {filename}"
-            return CommandResult(data=json_data, text=result, exit_code=0)
-        except FileNotFoundError:
-            result = f"load: {filename}: No such file"
-            return CommandResult(data=None, text=result, exit_code=1)
-        except Exception as e:
-            result = f"load: {filename}: Error: {e}"
-            return CommandResult(data=None, text=result, exit_code=1)
-
-    def commit(self, filename: str = 'dagshell.json') -> CommandResult:
-        """Alias for save - commit virtual filesystem to JSON file.
-
-        Usage:
-            commit [FILENAME]
-
-        Options:
-            FILENAME               File to save to (default: dagshell.json)
-
-        Examples:
-            commit                 # Save to dagshell.json
-            commit state.json      # Save to state.json
-
-        Returns:
-            Status message.
-        """
-        return self.save(filename)
 
     def import_file(self, real_path: str, virtual_path: Optional[str] = None,
                     safe_paths: Optional[List[str]] = None, recursive: bool = True) -> CommandResult:
@@ -2279,9 +2178,6 @@ class DagShell:
         Returns:
             Status message or error.
         """
-        import os
-        import pathlib
-
         # Default safe paths if not specified
         if safe_paths is None:
             safe_paths = [
@@ -2410,8 +2306,6 @@ class DagShell:
         Returns:
             Status message or error.
         """
-        import os
-
         # Default safe paths if not specified
         if safe_paths is None:
             safe_paths = [

@@ -8,16 +8,16 @@ Core philosophy:
 - Simple, composable operations following Unix philosophy
 """
 
+import base64
+import builtins
 import hashlib
 import json
-import time
 import os
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Set, Union, Any
-from enum import IntEnum
+import time
 from collections import defaultdict
-import random
-import string
+from dataclasses import dataclass, field, asdict
+from enum import IntEnum
+from typing import Dict, List, Optional, Set, Tuple, Union, Any
 
 
 class Mode(IntEnum):
@@ -65,19 +65,19 @@ class Node:
 
     def is_file(self) -> bool:
         """Check if this is a regular file."""
-        return (self.mode & Mode.IFDIR) == 0 and (self.mode & Mode.IFCHR) == 0
+        return (self.mode & 0o170000) == Mode.IFREG
 
     def is_dir(self) -> bool:
         """Check if this is a directory."""
-        return (self.mode & Mode.IFDIR) != 0
+        return (self.mode & 0o170000) == Mode.IFDIR
 
     def is_device(self) -> bool:
         """Check if this is a device."""
-        return (self.mode & Mode.IFCHR) != 0
+        return (self.mode & 0o170000) == Mode.IFCHR
 
     def is_symlink(self) -> bool:
         """Check if this is a symbolic link."""
-        return (self.mode & Mode.IFLNK) == Mode.IFLNK
+        return (self.mode & 0o170000) == Mode.IFLNK
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,6 @@ class FileNode(Node):
     def to_dict(self) -> dict:
         d = super().to_dict()
         # Store content as base64 for JSON serialization
-        import base64
         d['content'] = base64.b64encode(self.content).decode('ascii')
         d['type'] = 'file'
         return d
@@ -328,7 +327,7 @@ developers:x:2000:alice,bob"""
 
         return node_hash
 
-    def _get_parent_path(self, path: str) -> tuple[str, str]:
+    def _get_parent_path(self, path: str) -> Tuple[str, str]:
         """Split path into parent directory and basename."""
         path = os.path.normpath(path)
         if path == '/':
@@ -706,7 +705,7 @@ developers:x:2000:alice,bob"""
 
     # User and permission management
 
-    def lookup_user(self, username: str) -> tuple[int, int]:
+    def lookup_user(self, username: str) -> Tuple[int, int]:
         """Look up user ID and primary group ID from /etc/passwd."""
         passwd_hash = self._resolve_path('/etc/passwd')
         if not passwd_hash:
@@ -813,8 +812,6 @@ developers:x:2000:alice,bob"""
         Returns:
             Number of files/directories exported
         """
-        import shutil
-
         # Default mappings (virtual -> real)
         if uid_map is None:
             uid_map = {0: 0, 1000: os.getuid(), 1001: os.getuid(), 1002: os.getuid()}
@@ -851,7 +848,7 @@ developers:x:2000:alice,bob"""
                     mode = node.mode & 0o777
                     try:
                         os.chmod(real_path, mode)
-                    except:
+                    except Exception:
                         pass  # Ignore permission errors
 
             elif node.is_file():
@@ -860,7 +857,6 @@ developers:x:2000:alice,bob"""
                 os.makedirs(parent_dir, exist_ok=True)
 
                 # Write file content
-                import builtins
                 with builtins.open(real_path, 'wb') as f:
                     f.write(node.content)
                 exported += 1
@@ -870,7 +866,7 @@ developers:x:2000:alice,bob"""
                     mode = node.mode & 0o777
                     try:
                         os.chmod(real_path, mode)
-                    except:
+                    except Exception:
                         pass  # Ignore permission errors
 
                 # Try to set ownership if running as root
@@ -879,7 +875,7 @@ developers:x:2000:alice,bob"""
                     real_gid = gid_map.get(node.gid, node.gid)
                     try:
                         os.chown(real_path, real_uid, real_gid)
-                    except:
+                    except Exception:
                         pass  # Ignore if can't change ownership
 
         return exported
@@ -905,8 +901,6 @@ developers:x:2000:alice,bob"""
             FileNotFoundError: If source_path doesn't exist
             ValueError: If target_path is invalid
         """
-        import builtins
-
         if uid is None:
             uid = 1000
         if gid is None:
@@ -1046,13 +1040,12 @@ developers:x:2000:alice,bob"""
         fs.refs = defaultdict(int)
 
         # Reconstruct nodes
-        import base64
         for hash, node_data in data['nodes'].items():
-            node_type = node_data.pop('type', 'file')
+            node_type = node_data.get('type', 'file')
 
             if node_type == 'file':
-                content = base64.b64decode(node_data.pop('content', ''))
-                node = FileNode(content=content, **{k: v for k, v in node_data.items() if k != 'content'})
+                content = base64.b64decode(node_data.get('content', ''))
+                node = FileNode(content=content, **{k: v for k, v in node_data.items() if k not in ('type', 'content')})
             elif node_type == 'dir':
                 node = DirNode(**{k: v for k, v in node_data.items() if k != 'type'})
             elif node_type == 'device':

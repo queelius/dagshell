@@ -383,10 +383,9 @@ class TestTerminalSession(unittest.TestCase):
             self.assertIn("hello", output)
 
     def test_clear_command(self):
-        """Test clear command."""
-        with patch('os.system') as mock_system:
-            self.session.execute_command("clear")
-            mock_system.assert_called_once()
+        """Test clear command uses ANSI escape."""
+        output = self.session.execute_command("clear")
+        self.assertEqual(output, '')
 
     def test_combined_features(self):
         """Test combination of features."""

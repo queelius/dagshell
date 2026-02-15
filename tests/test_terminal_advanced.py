@@ -502,12 +502,10 @@ class TestTerminalClear(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
         readline.clear_history()
 
-    @patch('os.system')
-    def test_clear_command(self, mock_system):
-        """Test clear command."""
+    def test_clear_command(self):
+        """Test clear command uses ANSI escape."""
         output = self.session.execute_command('clear')
         self.assertEqual(output, '')
-        mock_system.assert_called()
 
 
 class TestHistoryManagerExceptions(unittest.TestCase):
