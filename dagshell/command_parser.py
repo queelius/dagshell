@@ -14,7 +14,7 @@ Design Principles:
 
 import re
 import shlex
-from typing import List, Dict, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
 from enum import Enum
 
@@ -206,7 +206,7 @@ class CommandParser:
         This is the main entry point for parsing shell commands.
         """
         # Handle empty input
-        if not command_line or command_line.strip() == '':
+        if not command_line or not command_line.strip():
             return CommandGroup(pipelines=[])
 
         # Split by command operators (&&, ||, ;, &)
@@ -313,10 +313,15 @@ class CommandParser:
             return None
 
         cmd_name = tokens[0]
-        raw_args = tokens[1:] if len(tokens) > 1 else []
+        raw_args = tokens[1:]
 
-        # Parse flags and arguments
-        flags, args = self._parse_flags(cmd_name, raw_args)
+        # Commands that use GNU-style single-dash long flags (e.g. -name, -type)
+        # must skip normal flag parsing to avoid shredding them into char flags
+        if cmd_name in ('find',):
+            flags, args = {}, list(raw_args)
+        else:
+            # Parse flags and arguments
+            flags, args = self._parse_flags(cmd_name, raw_args)
 
         return Command(
             name=cmd_name,
@@ -326,35 +331,28 @@ class CommandParser:
             raw_args=raw_args
         )
 
+    _REDIRECT_TYPE_MAP = {
+        '>': RedirectType.WRITE,
+        '>>': RedirectType.APPEND,
+        '<': RedirectType.READ,
+        '<<': RedirectType.HERE_DOC,
+        '<<<': RedirectType.HERE_STR,
+    }
+
     def _extract_redirections(self, command_str: str) -> Tuple[List[Redirect], str]:
         """Extract redirections from a command string."""
         redirects = []
-        clean_str = command_str
 
-        # Find all redirections
         for match in self.redirect_pattern.finditer(command_str):
             fd_str, op, target = match.groups()
-            fd = int(fd_str) if fd_str else (1 if op.startswith('>') else 0)
-
-            # Determine redirection type
-            if op == '>':
-                redirect_type = RedirectType.WRITE
-            elif op == '>>':
-                redirect_type = RedirectType.APPEND
-            elif op == '<':
-                redirect_type = RedirectType.READ
-            elif op == '<<':
-                redirect_type = RedirectType.HERE_DOC
-            elif op == '<<<':
-                redirect_type = RedirectType.HERE_STR
-            else:
+            redirect_type = self._REDIRECT_TYPE_MAP.get(op)
+            if redirect_type is None:
                 continue
 
+            fd = int(fd_str) if fd_str else (1 if op.startswith('>') else 0)
             redirects.append(Redirect(type=redirect_type, target=target, fd=fd))
 
-        # Remove redirections from command string
-        clean_str = self.redirect_pattern.sub('', clean_str)
-
+        clean_str = self.redirect_pattern.sub('', command_str)
         return redirects, clean_str.strip()
 
     def _parse_flags(self, cmd_name: str, args: List[str]) -> Tuple[Dict[str, Union[bool, str, int]], List[str]]:

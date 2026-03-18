@@ -17,7 +17,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from enum import IntEnum
-from typing import Dict, List, Optional, Set, Tuple, Union, Any
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 
 class Mode(IntEnum):
@@ -480,6 +480,43 @@ developers:x:2000:alice,bob"""
 
         return node.target
 
+    def _clone_node(self, node: Node, mode: int, uid: int, gid: int) -> Optional[Node]:
+        """Create a copy of a node with updated mode, uid, and gid.
+
+        Returns None if the node type is unrecognized.
+        """
+        if node.is_file():
+            return FileNode(content=node.content, mode=mode,
+                            uid=uid, gid=gid, mtime=node.mtime)
+        elif node.is_dir():
+            return DirNode(children=node.children, mode=mode,
+                           uid=uid, gid=gid, mtime=node.mtime)
+        elif node.is_symlink():
+            return SymlinkNode(target=node.target, mode=mode,
+                               uid=uid, gid=gid, mtime=node.mtime)
+        elif node.is_device():
+            return DeviceNode(device_type=node.device_type, mode=mode,
+                              uid=uid, gid=gid, mtime=node.mtime)
+        return None
+
+    def _update_parent_reference(self, path: str, child_name: str, child_hash: str) -> None:
+        """Update the parent directory to reference a new child hash."""
+        parent_path, _ = self._get_parent_path(path)
+        if not parent_path:
+            return
+
+        parent_hash = self._resolve_path(parent_path)
+        if not parent_hash:
+            return
+
+        parent = self.nodes[parent_hash]
+        if not parent.is_dir():
+            return
+
+        new_parent = parent.with_child(child_name, child_hash)
+        new_parent_hash = self._add_node(new_parent)
+        self.paths[parent_path] = new_parent_hash
+
     def chmod(self, path: str, mode: int) -> bool:
         """Change file mode bits.
 
@@ -497,41 +534,18 @@ developers:x:2000:alice,bob"""
         node = self.nodes[node_hash]
 
         # Preserve file type bits, update permission bits
-        type_bits = node.mode & 0o170000  # Extract type (dir, file, symlink, etc.)
-        new_mode = type_bits | (mode & 0o7777)  # Combine with new permission bits
+        type_bits = node.mode & 0o170000
+        new_mode = type_bits | (mode & 0o7777)
 
-        # Create new node with updated mode
-        if node.is_file():
-            new_node = FileNode(content=node.content, mode=new_mode,
-                               uid=node.uid, gid=node.gid, mtime=node.mtime)
-        elif node.is_dir():
-            new_node = DirNode(children=node.children, mode=new_mode,
-                              uid=node.uid, gid=node.gid, mtime=node.mtime)
-        elif node.is_symlink():
-            new_node = SymlinkNode(target=node.target, mode=new_mode,
-                                  uid=node.uid, gid=node.gid, mtime=node.mtime)
-        elif node.is_device():
-            new_node = DeviceNode(device_type=node.device_type, mode=new_mode,
-                                 uid=node.uid, gid=node.gid, mtime=node.mtime)
-        else:
+        new_node = self._clone_node(node, new_mode, node.uid, node.gid)
+        if new_node is None:
             return False
 
         new_hash = self._add_node(new_node)
         self.paths[path] = new_hash
 
-        # Update parent directory reference
-        parent_path, name = self._get_parent_path(path)
-        if parent_path:
-            parent_hash = self._resolve_path(parent_path)
-            if parent_hash:
-                parent = self.nodes[parent_hash]
-                if parent.is_dir():
-                    new_parent = DirNode(
-                        children={**parent.children, name: new_hash},
-                        mode=parent.mode, uid=parent.uid, gid=parent.gid, mtime=parent.mtime
-                    )
-                    new_parent_hash = self._add_node(new_parent)
-                    self.paths[parent_path] = new_parent_hash
+        _, name = self._get_parent_path(path)
+        self._update_parent_reference(path, name, new_hash)
 
         return True
 
@@ -555,38 +569,15 @@ developers:x:2000:alice,bob"""
         new_uid = uid if uid is not None else node.uid
         new_gid = gid if gid is not None else node.gid
 
-        # Create new node with updated ownership
-        if node.is_file():
-            new_node = FileNode(content=node.content, mode=node.mode,
-                               uid=new_uid, gid=new_gid, mtime=node.mtime)
-        elif node.is_dir():
-            new_node = DirNode(children=node.children, mode=node.mode,
-                              uid=new_uid, gid=new_gid, mtime=node.mtime)
-        elif node.is_symlink():
-            new_node = SymlinkNode(target=node.target, mode=node.mode,
-                                  uid=new_uid, gid=new_gid, mtime=node.mtime)
-        elif node.is_device():
-            new_node = DeviceNode(device_type=node.device_type, mode=node.mode,
-                                 uid=new_uid, gid=new_gid, mtime=node.mtime)
-        else:
+        new_node = self._clone_node(node, node.mode, new_uid, new_gid)
+        if new_node is None:
             return False
 
         new_hash = self._add_node(new_node)
         self.paths[path] = new_hash
 
-        # Update parent directory reference
-        parent_path, name = self._get_parent_path(path)
-        if parent_path:
-            parent_hash = self._resolve_path(parent_path)
-            if parent_hash:
-                parent = self.nodes[parent_hash]
-                if parent.is_dir():
-                    new_parent = DirNode(
-                        children={**parent.children, name: new_hash},
-                        mode=parent.mode, uid=parent.uid, gid=parent.gid, mtime=parent.mtime
-                    )
-                    new_parent_hash = self._add_node(new_parent)
-                    self.paths[parent_path] = new_parent_hash
+        _, name = self._get_parent_path(path)
+        self._update_parent_reference(path, name, new_hash)
 
         return True
 
@@ -653,6 +644,17 @@ developers:x:2000:alice,bob"""
 
         return len(to_remove)
 
+    def _node_type_str(self, node: Node) -> str:
+        """Return the type string for a node."""
+        if node.is_file():
+            return 'file'
+        elif node.is_dir():
+            return 'dir'
+        elif node.is_symlink():
+            return 'symlink'
+        else:
+            return 'device'
+
     def stat(self, path: str) -> Optional[dict]:
         """Get file/directory statistics."""
         node_hash = self._resolve_path(path)
@@ -661,7 +663,7 @@ developers:x:2000:alice,bob"""
 
         node = self.nodes[node_hash]
         return {
-            'type': 'file' if node.is_file() else 'dir' if node.is_dir() else 'device',
+            'type': self._node_type_str(node),
             'mode': node.mode,
             'uid': node.uid,
             'gid': node.gid,
@@ -745,6 +747,27 @@ developers:x:2000:alice,bob"""
 
         return groups
 
+    # Permission categories: map any read/write/execute permission to its category
+    _READ_PERMS = frozenset({Mode.IRUSR, Mode.IRGRP, Mode.IROTH})
+    _WRITE_PERMS = frozenset({Mode.IWUSR, Mode.IWGRP, Mode.IWOTH})
+    _EXEC_PERMS = frozenset({Mode.IXUSR, Mode.IXGRP, Mode.IXOTH})
+
+    def _check_mode_bits(self, mode: int, permission: int, shift: int) -> bool:
+        """Check a permission category (read/write/exec) at a given shift level.
+
+        Args:
+            mode: The full mode bits of the node
+            permission: The permission being requested
+            shift: Bit shift for scope (6=owner, 3=group, 0=other)
+        """
+        if permission in self._READ_PERMS:
+            return bool(mode & (0o4 << shift))
+        elif permission in self._WRITE_PERMS:
+            return bool(mode & (0o2 << shift))
+        elif permission in self._EXEC_PERMS:
+            return bool(mode & (0o1 << shift))
+        return False
+
     def check_permission(self, path: str, uid: int, gids: Set[int], permission: int) -> bool:
         """
         Check if user has specific permission for a path.
@@ -771,31 +794,14 @@ developers:x:2000:alice,bob"""
 
         # Owner permissions
         if uid == node.uid:
-            if permission in [Mode.IRUSR, Mode.IRGRP, Mode.IROTH]:
-                return bool(mode & Mode.IRUSR)
-            elif permission in [Mode.IWUSR, Mode.IWGRP, Mode.IWOTH]:
-                return bool(mode & Mode.IWUSR)
-            elif permission in [Mode.IXUSR, Mode.IXGRP, Mode.IXOTH]:
-                return bool(mode & Mode.IXUSR)
+            return self._check_mode_bits(mode, permission, 6)
 
         # Group permissions
         if node.gid in gids:
-            if permission in [Mode.IRUSR, Mode.IRGRP, Mode.IROTH]:
-                return bool(mode & Mode.IRGRP)
-            elif permission in [Mode.IWUSR, Mode.IWGRP, Mode.IWOTH]:
-                return bool(mode & Mode.IWGRP)
-            elif permission in [Mode.IXUSR, Mode.IXGRP, Mode.IXOTH]:
-                return bool(mode & Mode.IXGRP)
+            return self._check_mode_bits(mode, permission, 3)
 
         # Other permissions
-        if permission in [Mode.IRUSR, Mode.IRGRP, Mode.IROTH]:
-            return bool(mode & Mode.IROTH)
-        elif permission in [Mode.IWUSR, Mode.IWGRP, Mode.IWOTH]:
-            return bool(mode & Mode.IWOTH)
-        elif permission in [Mode.IXUSR, Mode.IXGRP, Mode.IXOTH]:
-            return bool(mode & Mode.IXOTH)
-
-        return False
+        return self._check_mode_bits(mode, permission, 0)
 
     def export_to_real(self, target_path: str, preserve_permissions: bool = True,
                       uid_map: Optional[Dict[int, int]] = None,

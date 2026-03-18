@@ -82,7 +82,9 @@ dagshell cat /data/file.txt
   - `FileNode`: Regular files with byte content
   - `DirNode`: Directories with entries dict mapping names to hashes
   - `DeviceNode`: Virtual devices (/dev/null, /dev/random, /dev/zero)
-- **FileSystem Class**: Manages the DAG with `_nodes` (hash→node) and `_root` (root directory hash).
+  - `SymlinkNode`: Symbolic links with target path
+- **FileSystem Class**: Manages the DAG with `nodes` (hash→node) and `paths` (path→hash).
+- **Type Checking**: All `is_file()`/`is_dir()`/`is_device()`/`is_symlink()` use proper POSIX bitmask `(mode & 0o170000) == TYPE`.
 
 ### Fluent API (dagshell_fluent.py)
 - **CommandResult**: Wrapper enabling method chaining. Has `.data`, `.text`, `.exit_code`.
@@ -130,18 +132,20 @@ dagshell cat /data/file.txt
 4. **Testability**:
    - Pure functions where possible
    - Clear interfaces between components
-   - Comprehensive test suite with 836 tests
+   - Comprehensive test suite with 859 tests at 88% coverage
 
 ## Testing Strategy
 
 - **Comprehensive Test Coverage**: Target is high coverage across all modules
-- **Test Organization**:
-  - Core filesystem: `test_dagshell.py`, `test_core_filesystem_comprehensive.py`
-  - Fluent API: `test_fluent.py`
-  - Terminal: `test_terminal.py`, `test_terminal_features.py`, `test_terminal_advanced.py`
-  - Scheme: `test_scheme_interpreter.py`, `test_scheme_integration_comprehensive.py`
-  - Integration: `test_integration.py`
-  - Edge cases: `test_edge_cases_comprehensive.py`
+- **Test Organization** (26 test files):
+  - Core filesystem: `test_dagshell.py`, `test_dagshell_extended.py`, `test_core_filesystem_comprehensive.py`
+  - Fluent API: `test_fluent.py`, `test_text_processing_comprehensive.py`, `test_import_export_comprehensive.py`
+  - Terminal: `test_terminal.py`, `test_terminal_features.py`, `test_terminal_advanced.py`, `test_terminal_coverage.py`
+  - Command parser: `test_command_parser_coverage.py`
+  - Scheme: `test_scheme_interpreter.py`, `test_scheme_integration_comprehensive.py`, `test_scheme_extended.py`
+  - Integration: `test_integration.py`, `test_persistence_comprehensive.py`
+  - Regression/review: `test_regression_fixes.py`, `test_code_review_fixes.py`
+  - Edge cases: `test_edge_cases_comprehensive.py`, `test_user_permissions.py`
 - **When adding features**: Write tests first or alongside implementation
 - **After changes**: Run relevant test suite and verify coverage hasn't dropped
 
@@ -193,3 +197,5 @@ def new_command(self, arg1, arg2):
 - **Permissions**: Unix-style permissions (mode bits) are enforced via `can_read()`, `can_write()`, `can_execute()`
 - **Path Resolution**: Always use `_resolve_path()` to handle relative paths correctly
 - **Content Encoding**: Files store bytes, conversion to/from str handled at API boundaries
+- **Path Authority**: `self.paths` is the canonical path→hash mapping. Directory `children` dicts may be stale after mutations (write/chmod/chown only propagate one level up). This is a known limitation.
+- **Serialization**: `from_json()` uses `.get()` (not `.pop()`) to avoid mutating input data. Keep it idempotent.

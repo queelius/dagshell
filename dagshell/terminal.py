@@ -19,13 +19,16 @@ import getpass
 import json
 import os
 import re
-import readline
+try:
+    import readline
+except ImportError:
+    readline = None
 import socket
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, Callable
+from typing import Dict, List, Optional, Tuple
 
 from .command_parser import (
     CommandParser, Command, Pipeline, CommandGroup,
@@ -34,10 +37,18 @@ from .command_parser import (
 from .dagshell_fluent import DagShell, CommandResult
 
 
+def _safe_getuser():
+    """Get current username, falling back to 'user' in restricted environments."""
+    try:
+        return getpass.getuser()
+    except (ImportError, KeyError, OSError):
+        return 'user'
+
+
 @dataclass
 class TerminalConfig:
     """Configuration for terminal session."""
-    user: str = field(default_factory=lambda: getpass.getuser())
+    user: str = field(default_factory=lambda: _safe_getuser())
     hostname: str = field(default_factory=lambda: socket.gethostname().split('.')[0])
     home_dir: str = '/home/user'
     initial_dir: str = '/'
@@ -70,11 +81,13 @@ class HistoryManager:
         self.history_file = history_file
         self.max_size = max_size
         self.history: List[str] = []
-        self._initial_history_length = readline.get_current_history_length()
+        self._initial_history_length = readline.get_current_history_length() if readline else 0
         self._load_history()
 
     def _load_history(self):
         """Load history from file."""
+        if not readline:
+            return
         try:
             if os.path.exists(self.history_file):
                 readline.clear_history()
@@ -90,6 +103,8 @@ class HistoryManager:
 
     def save_history(self):
         """Save history to file."""
+        if not readline:
+            return
         try:
             readline.write_history_file(self.history_file)
         except (IOError, OSError):
@@ -100,7 +115,8 @@ class HistoryManager:
         if command and command.strip():
             if not self.history or self.history[-1] != command:
                 self.history.append(command)
-                readline.add_history(command)
+                if readline:
+                    readline.add_history(command)
                 if len(self.history) > self.max_size:
                     self.history = self.history[-self.max_size:]
 
@@ -265,6 +281,8 @@ class TabCompleter:
 
     def complete(self, text: str, state: int) -> Optional[str]:
         """Readline completion function."""
+        if not readline:
+            return None
         line = readline.get_line_buffer()
         begin = readline.get_begidx()
 
@@ -346,28 +364,31 @@ class CommandExecutor:
 
     def execute(self, command_group: CommandGroup) -> CommandResult:
         """Execute a CommandGroup and return the final result."""
+        accumulated_text = []
         last_result = None
-        last_exit_code = 0
 
         for pipeline, operator in command_group.pipelines:
-            # Execute the pipeline
             result = self._execute_pipeline(pipeline)
 
             # Handle operators
-            if operator == '&&':
-                # Execute next only if this succeeded
-                if result.exit_code != 0:
-                    break
-            elif operator == '||':
-                # Execute next only if this failed
-                if result.exit_code == 0:
-                    break
+            if operator == '&&' and result.exit_code != 0:
+                accumulated_text.append(result.text or '')
+                last_result = result
+                break
+            elif operator == '||' and result.exit_code == 0:
+                accumulated_text.append(result.text or '')
+                last_result = result
+                break
             # For ';' and '&', always continue
 
+            accumulated_text.append(result.text or '')
             last_result = result
-            last_exit_code = result.exit_code
 
-        return last_result or CommandResult(data='', text='', exit_code=0)
+        if last_result is None:
+            return CommandResult(data='', text='', exit_code=0)
+
+        combined_text = '\n'.join(t for t in accumulated_text if t)
+        return CommandResult(data=last_result.data, text=combined_text, exit_code=last_result.exit_code)
 
     def _execute_pipeline(self, pipeline: Pipeline) -> CommandResult:
         """Execute a pipeline of commands."""
@@ -385,8 +406,32 @@ class CommandExecutor:
 
         return result
 
+    def _expand_variables(self, text: str) -> str:
+        """Expand tilde and $VARIABLE references in a string."""
+        # Expand ~ at start
+        if text.startswith('~'):
+            home = self.shell._env.get('HOME', '/home/user')
+            text = home + text[1:]
+        # Expand ${VAR} first (more specific), then $VAR
+        text = re.sub(r'\$\{(\w+)\}', lambda m: self.shell._env.get(m.group(1), ''), text)
+        text = re.sub(r'\$(\w+)', lambda m: self.shell._env.get(m.group(1), ''), text)
+        return text
+
     def _execute_command(self, command: Command) -> CommandResult:
         """Execute a single command by calling the appropriate shell method."""
+
+        # Expand variables in command arguments
+        command = Command(
+            name=command.name,
+            args=[self._expand_variables(a) for a in command.args],
+            flags=command.flags,
+            redirects=command.redirects,
+            raw_args=command.raw_args
+        )
+
+        # Handle export VAR=value before normal dispatch
+        if command.name == 'export' and command.args and '=' in command.args[0]:
+            return self._handle_export(command.args)
 
         # Check for help flags first
         # Note: don't treat -h as help for commands that use -h for other purposes
@@ -412,12 +457,25 @@ class CommandExecutor:
 
         # Execute the command
         try:
-            result = method(*args, **kwargs)
+            try:
+                result = method(*args, **kwargs)
+            except TypeError as e:
+                if 'unexpected keyword argument' in str(e):
+                    # Filter out unknown kwargs and retry
+                    import inspect
+                    sig = inspect.signature(method)
+                    valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+                    result = method(*args, **valid_kwargs)
+                else:
+                    raise
 
             # Handle DagShell returns (for commands like cd, mkdir)
             if isinstance(result, DagShell):
-                # These commands modify state but don't produce output
-                result = CommandResult(data='', text='', exit_code=0)
+                lr = self.shell._last_result
+                if lr and lr.exit_code != 0:
+                    result = lr
+                else:
+                    result = CommandResult(data='', text='', exit_code=0)
             elif not isinstance(result, CommandResult):
                 # Wrap non-CommandResult returns
                 result = CommandResult(data=result, text=str(result), exit_code=0)
@@ -435,15 +493,11 @@ class CommandExecutor:
                 exit_code=1
             )
 
-
     def _show_help(self, command: Optional[str] = None) -> CommandResult:
         """Show help information for commands."""
         if command:
-            # Show help for specific command
             return self._show_command_help(command)
-        else:
-            # Show general help with all commands
-            return self._show_all_commands_help()
+        return self._show_all_commands_help()
 
     def _extract_docstring_sections(self, docstring: str) -> dict:
         """Extract structured sections from a docstring."""
@@ -665,12 +719,7 @@ Examples:
 
     def _get_shell_method(self, command_name: str):
         """Get the shell method for a command name."""
-        # Direct method mapping
-        method = getattr(self.shell, command_name, None)
-        if method and callable(method):
-            return method
-
-        # Handle special cases and aliases
+        # Check aliases first for commands that override shell methods
         aliases = {
             'clear': lambda: CommandResult(data='', text='\033[2J\033[H', exit_code=0),
             'exit': lambda: CommandResult(data='', text='exit', exit_code=0),
@@ -678,37 +727,55 @@ Examples:
             'help': lambda *args: self._show_help(args[0] if args else None),
             '?': lambda *args: self._show_help(args[0] if args else None),
             'su': lambda *args: self._su(args[0] if args else 'root'),
-            'export': lambda *args: self._export(args[0] if args else 'export'),
+            'export': lambda *args: self._handle_export(args),
             'scheme': lambda *args: self._run_scheme_command(args),
         }
 
-        return aliases.get(command_name)
+        alias = aliases.get(command_name)
+        if alias:
+            return alias
+
+        # Direct method mapping on shell object
+        method = getattr(self.shell, command_name, None)
+        if method and callable(method):
+            return method
+
+        return None
 
     def _prepare_arguments(self, command: Command) -> Tuple[List, Dict]:
         """Prepare arguments and keyword arguments for method call."""
         args = []
         kwargs = {}
 
-        # Special handling for different commands
-        if command.name == 'help':
-            # Handle help with optional command argument
+        # Commands that take a single optional argument
+        _SINGLE_ARG_CMDS = {'help', 'cd', 'touch', 'stat', 'readlink', 'id',
+                            'env', 'tee', 'dirname', 'tree'}
+
+        # Commands that pass all args with all flags as kwargs
+        _ARGS_AND_FLAGS_CMDS = {'echo', 'grep', 'wc', 'sort', 'uniq'}
+
+        # Commands that pass first arg with flags
+        _FIRST_ARG_AND_FLAGS_CMDS = {'ls', 'mkdir', 'rm'}
+
+        # Commands that take exactly two positional args
+        _TWO_ARG_CMDS = {'cp', 'mv', 'chmod', 'chown', 'tr'}
+
+        if command.name in _SINGLE_ARG_CMDS:
             if command.args:
                 args.append(command.args[0])
-        elif command.name == 'ls':
+
+        elif command.name in _FIRST_ARG_AND_FLAGS_CMDS:
             if command.args:
                 args.append(command.args[0])
             kwargs.update(command.flags)
-        elif command.name in ['head', 'tail']:
-            # Handle head/tail arguments
-            # head can be called as: head -n 5, head -5, or head 5
-            n_value = 10  # default
 
-            # Check for various flag names that might contain the line count
+        elif command.name in ['head', 'tail']:
+            # head/tail: -n 5, -5, or default 10
+            n_value = 10
             if 'n' in command.flags:
                 n_value = command.flags['n']
             elif 'lines' in command.flags:
                 n_value = command.flags['lines']
-            # Check for numeric flags like -5
             else:
                 for flag_key in command.flags:
                     try:
@@ -716,96 +783,58 @@ Examples:
                         break
                     except ValueError:
                         pass
-
-            # First argument is the number of lines
             args.append(n_value)
-
-            # Remaining arguments are file paths
             args.extend(command.args)
-
-            # Don't pass flags as kwargs since we handled them
             return args, {}
-
-        elif command.name == 'cd':
-            if command.args:
-                args.append(command.args[0])
 
         elif command.name == 'cat':
             args.extend(command.args)
 
-        elif command.name == 'echo':
-            args.extend(command.args)
-            kwargs.update(command.flags)
-
-        elif command.name == 'grep':
-            if command.args:
-                args.append(command.args[0])  # pattern
-                args.extend(command.args[1:])  # files
-            kwargs.update(command.flags)
-
-        elif command.name == 'wc':
-            args.extend(command.args)
-            kwargs.update(command.flags)
-
-        elif command.name == 'sort':
-            args.extend(command.args)
-            kwargs.update(command.flags)
-
-        elif command.name == 'uniq':
+        elif command.name in _ARGS_AND_FLAGS_CMDS:
             args.extend(command.args)
             kwargs.update(command.flags)
 
         elif command.name == 'find':
-            if command.args:
-                args.append(command.args[0])  # path
-            # Handle find-specific flags
-            for key, value in command.flags.items():
-                if key == 'type':
-                    kwargs['type'] = value
-                elif key == 'name' and len(command.args) > 1:
-                    kwargs['name'] = command.args[1]
+            # find uses GNU-style single-dash long flags: -name PATTERN -type TYPE -maxdepth N
+            # Parse manually from args since the parser skips flag parsing for find
+            path = None
+            i = 0
+            raw = command.args
+            while i < len(raw):
+                if raw[i] == '-name' and i + 1 < len(raw):
+                    kwargs['name'] = raw[i + 1]
+                    i += 2
+                elif raw[i] == '-type' and i + 1 < len(raw):
+                    kwargs['type'] = raw[i + 1]
+                    i += 2
+                elif raw[i] == '-maxdepth' and i + 1 < len(raw):
+                    kwargs['maxdepth'] = int(raw[i + 1])
+                    i += 2
+                elif path is None and not raw[i].startswith('-'):
+                    path = raw[i]
+                    i += 1
+                else:
+                    i += 1
+            if path:
+                args.append(path)
+            return args, kwargs
 
-        elif command.name == 'mkdir':
-            if command.args:
-                args.append(command.args[0])
-            kwargs.update(command.flags)
-
-        elif command.name == 'touch':
-            if command.args:
-                args.append(command.args[0])
-
-        elif command.name == 'rm':
-            if command.args:
-                args.append(command.args[0])
-            kwargs.update(command.flags)
-
-        elif command.name == 'cp':
-            args.extend(command.args[:2])  # src, dst
-
-        elif command.name == 'mv':
-            args.extend(command.args[:2])  # src, dst
+        elif command.name in _TWO_ARG_CMDS:
+            args.extend(command.args[:2])
 
         elif command.name == 'ln':
-            # ln [-s] source dest
-            args.extend(command.args[:2])  # source, dest
+            args.extend(command.args[:2])
             if 's' in command.flags or 'symbolic' in command.flags:
                 kwargs['symbolic'] = True
 
-        elif command.name == 'chmod':
-            # chmod mode path
-            if len(command.args) >= 2:
-                args.append(command.args[0])  # mode
-                args.append(command.args[1])  # path
-
-        elif command.name == 'chown':
-            # chown owner[:group] path
-            if len(command.args) >= 2:
-                args.append(command.args[0])  # owner
-                args.append(command.args[1])  # path
+        elif command.name == 'basename':
+            if command.args:
+                args.append(command.args[0])
+                if len(command.args) > 1:
+                    args.append(command.args[1])
 
         elif command.name == 'diff':
-            # diff [-u] file1 file2
-            args.extend(command.args[:2])  # file1, file2
+            args.extend(command.args[:2])
             if 'u' in command.flags or 'unified' in command.flags:
                 kwargs['unified'] = True
             if 'context' in command.flags:
@@ -814,7 +843,6 @@ Examples:
                 kwargs['context'] = command.flags['c']
 
         elif command.name == 'cut':
-            # cut -d DELIM -f FIELDS [file...]
             if 'delimiter' in command.flags:
                 kwargs['delimiter'] = command.flags['delimiter']
             elif 'd' in command.flags:
@@ -825,64 +853,22 @@ Examples:
                 kwargs['fields'] = command.flags['f']
             args.extend(command.args)
 
-        elif command.name == 'tr':
-            # tr set1 set2
-            args.extend(command.args[:2])
-
         elif command.name == 'du':
-            # du [-h] [path...]
             if 'h' in command.flags or 'human_readable' in command.flags or 'human-readable' in command.flags:
                 kwargs['human_readable'] = True
             args.extend(command.args)
 
-        elif command.name == 'stat':
-            # stat path
-            if command.args:
-                args.append(command.args[0])
-
-        elif command.name == 'readlink':
-            # readlink path
-            if command.args:
-                args.append(command.args[0])
-
-        elif command.name == 'id':
-            # id [username]
-            if command.args:
-                args.append(command.args[0])
-
-        elif command.name == 'basename':
-            # basename path [suffix]
-            if command.args:
-                args.append(command.args[0])
-                if len(command.args) > 1:
-                    args.append(command.args[1])
-
-        elif command.name == 'dirname':
-            # dirname path
-            if command.args:
-                args.append(command.args[0])
-
         elif command.name == 'xargs':
-            # xargs command [args...]
             if command.args:
-                args.append(command.args[0])  # command
-                args.extend(command.args[1:])  # additional args
+                args.append(command.args[0])
+                args.extend(command.args[1:])
             if 'n' in command.flags:
                 kwargs['max_args'] = command.flags['n']
 
         elif command.name == 'pwd':
-            pass  # No arguments
-
-        elif command.name == 'env':
-            if command.args:
-                args.append(command.args[0])
-
-        elif command.name == 'tee':
-            if command.args:
-                args.append(command.args[0])
+            pass
 
         else:
-            # Default: pass all arguments
             args.extend(command.args)
             kwargs.update(command.flags)
 
@@ -903,6 +889,16 @@ Examples:
         # TODO: Handle other redirection types (INPUT, etc.)
 
         return result
+
+    def _handle_export(self, args) -> CommandResult:
+        """Handle export: set env var if VAR=value, otherwise fall through."""
+        if args:
+            arg = args[0]
+            if '=' in arg:
+                var, _, val = arg.partition('=')
+                self.shell.setenv(var.strip(), val.strip())
+                return CommandResult(data='', text='', exit_code=0)
+        return CommandResult(data='', text='export: missing VAR=value', exit_code=1)
 
     def _run_scheme_command(self, args) -> CommandResult:
         """Run a Scheme script or expression."""
@@ -1050,6 +1046,8 @@ class TerminalSession:
 
     def _setup_readline(self):
         """Configure readline for terminal."""
+        if not readline:
+            return
         if self.config.enable_tab_completion:
             self.tab_completer = TabCompleter(self.shell, self.alias_manager.aliases)
             readline.set_completer(self.tab_completer.complete)
@@ -1619,6 +1617,11 @@ Note: Host file operations require safe_host_directory to be configured."""
             elif first_cmd.name == 'export':
                 if not first_cmd.args:
                     return 'export: missing target path'
+                # export VAR=value sets an env var
+                if '=' in first_cmd.args[0]:
+                    var, _, val = first_cmd.args[0].partition('=')
+                    self.shell.setenv(var.strip(), val.strip())
+                    return ''
                 result = self._export(first_cmd.args[0])
                 return result.text
 
@@ -1752,7 +1755,7 @@ Environment:
                         help='Force interactive mode even with --fs')
 
     # Session options
-    parser.add_argument('-u', '--user', help='Set username', default=getpass.getuser())
+    parser.add_argument('-u', '--user', help='Set username', default=_safe_getuser())
     parser.add_argument('-d', '--directory', help='Set initial directory', default='/')
     parser.add_argument('--no-history', action='store_true',
                         help='Disable history expansion')

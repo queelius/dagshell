@@ -126,7 +126,11 @@ class TestNonExistentResources:
     def test_wc_nonexistent_file(self, shell):
         """Test wc on nonexistent file."""
         result = shell.wc('/nonexistent.txt')
-        assert result.exit_code != 0 or result.data == 0
+        # With no flags (default: all counts), data is a dict with all zeros
+        if isinstance(result.data, dict):
+            assert result.exit_code != 0 or all(v == 0 for v in result.data.values())
+        else:
+            assert result.exit_code != 0 or result.data == 0
 
 
 class TestInvalidPaths:

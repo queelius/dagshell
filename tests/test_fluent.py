@@ -297,16 +297,22 @@ class TestDagShellTextProcessing:
 
     def test_wc(self):
         """Test wc command."""
-        # Line count (default)
+        # Default: all counts (lines, words, chars)
         result = self.shell.wc('/data.txt')
-        assert result.data == 5  # 5 lines (counting newlines)
+        assert result.data['lines'] == 5  # 5 lines (counting newlines)
+        assert result.data['words'] == 7
+        assert result.data['chars'] > 0
 
-        # Word count
-        result = self.shell.wc('/data.txt', words=True, lines=False)
+        # Line count only
+        result = self.shell.wc('/data.txt', lines=True)
+        assert result.data == 5
+
+        # Word count only
+        result = self.shell.wc('/data.txt', words=True)
         assert result.data == 7
 
-        # Character count
-        result = self.shell.wc('/data.txt', chars=True, lines=False)
+        # Character count only
+        result = self.shell.wc('/data.txt', chars=True)
         assert result.data > 0
 
     def test_sort(self):
@@ -374,7 +380,7 @@ class TestDagShellChaining:
         self.shell.cat('/home/user/data.txt')
         self.shell.grep('a')  # matches apple, banana, apricot, grape (all 4 have 'a')
         result = self.shell.wc()
-        assert result.data == 4  # 4 lines matched
+        assert result.data['lines'] == 4  # 4 lines matched
 
     def test_output_redirection(self):
         """Test output redirection with .out()."""
@@ -542,7 +548,7 @@ class TestComplexPipelines:
         self.shell.cat('/system.log')
         self.shell.grep('ERROR')
         result = self.shell.wc()
-        assert result.data == 3  # 3 ERROR lines
+        assert result.data['lines'] == 3  # 3 ERROR lines
 
     def test_file_processing_pipeline(self):
         """Test file processing pipeline."""

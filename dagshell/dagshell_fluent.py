@@ -13,12 +13,15 @@ Core Design Principles:
 - Clean separation between command execution and output handling
 """
 
+import datetime
+import difflib
+import fnmatch
 import os
 import re
-import fnmatch
-from typing import List, Dict, Optional, Union, Any, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+
 from . import dagshell
 
 
@@ -149,6 +152,16 @@ class DagShell:
         self._dir_stack: List[str] = []  # Stack for pushd/popd
         self._history: List[str] = []  # Command history
         self._history_max: int = 1000  # Maximum history size
+        self._oldpwd = '/'
+        # Ensure HOME directory exists (create parents as needed)
+        home = self._env['HOME']
+        if not self.fs.exists(home):
+            parts = home.strip('/').split('/')
+            current = ''
+            for part in parts:
+                current = current + '/' + part
+                if not self.fs.exists(current):
+                    self.fs.mkdir(current)
 
     def _add_to_history(self, command: str) -> None:
         """Add a command to history."""
@@ -230,6 +243,26 @@ class DagShell:
             if not self.fs.exists(current):
                 self.fs.mkdir(current)
 
+    def _read_input_lines(self, paths: tuple) -> List[str]:
+        """Read lines from files or from the last result (stdin).
+
+        If paths are given, reads and splits each file's content into lines.
+        Otherwise, falls back to self._last_result as stdin.
+        """
+        if paths:
+            lines = []
+            for path in paths:
+                resolved = self._resolve_path(path)
+                content = self.fs.read(resolved)
+                if content:
+                    text = content.decode('utf-8', errors='replace')
+                    lines.extend(text.splitlines())
+            return lines
+
+        if self._last_result:
+            return self._last_result.lines()
+        return []
+
     def _glob_match(self, pattern: str, path: str = None) -> List[str]:
         """Match files using glob patterns."""
         path = self._resolve_path(path or self._cwd)
@@ -283,11 +316,8 @@ class DagShell:
         """
         if var:
             value = self._env.get(var, '')
-            result = CommandResult(data=value, text=value)
-        else:
-            result = CommandResult(data=dict(self._env))
-        self._last_result = result
-        return result
+            return self._make_result(data=value, text=value)
+        return self._make_result(data=dict(self._env))
 
     def setenv(self, var: str, value: str) -> 'DagShell':
         """Set environment variable.
@@ -390,7 +420,6 @@ class DagShell:
         gid = info['gid']
         mtime = info['mtime']
 
-        import datetime
         mtime_str = datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
 
         lines = [
@@ -456,6 +485,9 @@ class DagShell:
         if path is None:
             path = self._env.get('HOME', '/')
 
+        if path == '-':
+            path = self._oldpwd
+
         new_path = self._resolve_path(path)
 
         # Check if directory exists
@@ -479,8 +511,11 @@ class DagShell:
             )
             return self
 
+        old_cwd = self._cwd
         self._cwd = new_path
         self._env['PWD'] = new_path
+        self._oldpwd = old_cwd
+        self._env['OLDPWD'] = old_cwd
         self._last_result = CommandResult(data=new_path, text='', exit_code=0)
         return self
 
@@ -604,13 +639,11 @@ class DagShell:
         target_path = self._resolve_path(path or self._cwd)
 
         if not self.fs.exists(target_path):
-            result = CommandResult(
+            return self._make_result(
                 data=[],
                 text=f"ls: {path}: No such file or directory",
                 exit_code=2
             )
-            self._last_result = result
-            return result
 
         stat = self.fs.stat(target_path)
 
@@ -635,12 +668,55 @@ class DagShell:
                     mode_str = self._format_mode(fstat.get('mode', 0o100644))
                     size = fstat.get('size', 0)
                     detailed.append(f"{mode_str}  1 user user {size:8} {f}")
-            result = CommandResult(data=files, text='\n'.join(detailed))
-        else:
-            result = CommandResult(data=files, text='\n'.join(files))
+            return self._make_result(data=files, text='\n'.join(detailed))
 
-        self._last_result = result
-        return result
+        return self._make_result(data=files, text='\n'.join(files))
+
+    def tree(self, path: Optional[str] = None) -> CommandResult:
+        """Display directory structure as a tree with ASCII art.
+
+        Usage:
+            tree [PATH]
+
+        Options:
+            PATH                   Directory to display (default: current)
+
+        Examples:
+            tree                   # Show current directory tree
+            tree /project          # Show /project tree
+
+        Returns:
+            Tree representation of directory structure.
+        """
+        target_path = self._resolve_path(path or self._cwd)
+
+        if not self.fs.exists(target_path):
+            return self._make_result(
+                data=[],
+                text=f"tree: {path}: No such file or directory",
+                exit_code=2
+            )
+
+        lines = [target_path]
+        self._tree_recursive(target_path, '', lines)
+        text = '\n'.join(lines)
+        return self._make_result(data=lines, text=text)
+
+    def _tree_recursive(self, path: str, prefix: str, lines: List[str]) -> None:
+        """Recursively build tree lines with ASCII art connectors."""
+        entries = self.fs.ls(path) or []
+        entries = [e for e in entries if not e.startswith('.')]
+        entries.sort()
+        for i, entry in enumerate(entries):
+            is_last = (i == len(entries) - 1)
+            connector = '\u2514\u2500\u2500 ' if is_last else '\u251c\u2500\u2500 '
+            lines.append(f"{prefix}{connector}{entry}")
+            full_path = os.path.join(path, entry)
+            if self.fs.exists(full_path):
+                stat = self.fs.stat(full_path)
+                if stat and stat['type'] == 'dir':
+                    extension = '    ' if is_last else '\u2502   '
+                    self._tree_recursive(full_path, prefix + extension, lines)
 
     def cat(self, *paths: str) -> CommandResult:
         """Concatenate and display files.
@@ -799,8 +875,10 @@ class DagShell:
             )
             return self
 
-        # TODO: Implement recursive removal
-        self.fs.rm(resolved)
+        if recursive:
+            self._rm_recursive(resolved)
+        else:
+            self.fs.rm(resolved)
         return self
 
     def cp(self, src: str, dst: str) -> 'DagShell':
@@ -948,7 +1026,7 @@ class DagShell:
         Returns:
             Self for method chaining.
         """
-        target_path = self._resolve_path(target)
+        resolved_target = self._resolve_path(target)
         link_path = self._resolve_path(link_name)
 
         if symbolic:
@@ -961,8 +1039,7 @@ class DagShell:
                 )
         else:
             # Create hard link - both paths point to same content hash
-            target_resolved = self._resolve_path(target)
-            if not self.fs.exists(target_resolved):
+            if not self.fs.exists(resolved_target):
                 self._last_result = CommandResult(
                     data=None,
                     text=f"ln: failed to access '{target}': No such file or directory",
@@ -970,7 +1047,7 @@ class DagShell:
                 )
                 return self
 
-            stat = self.fs.stat(target_resolved)
+            stat = self.fs.stat(resolved_target)
             if stat and stat['type'] == 'dir':
                 self._last_result = CommandResult(
                     data=None,
@@ -980,7 +1057,7 @@ class DagShell:
                 return self
 
             # Read content and write to new path (same hash = hard link in DAG)
-            content = self.fs.read(target_resolved)
+            content = self.fs.read(resolved_target)
             if content is not None:
                 self.fs.write(link_path, content)
 
@@ -1200,46 +1277,26 @@ class DagShell:
             Lines matching the pattern.
         """
         # Prepare regex
-        flags = re.IGNORECASE if ignore_case else 0
+        re_flags = re.IGNORECASE if ignore_case else 0
         try:
-            regex = re.compile(pattern, flags)
+            regex = re.compile(pattern, re_flags)
         except re.error as e:
-            result = CommandResult(
+            return self._make_result(
                 data=[],
                 text=f"grep: invalid regex: {e}",
                 exit_code=2
             )
-            self._last_result = result
-            return result
 
-        # Get input
-        if paths:
-            # Read from files
-            lines = []
-            for path in paths:
-                resolved = self._resolve_path(path)
-                content = self.fs.read(resolved)
-                if content:
-                    text = content.decode('utf-8', errors='replace')
-                    for line in text.splitlines():
-                        lines.append(line)
-        else:
-            # Read from last result
-            if self._last_result:
-                lines = self._last_result.lines()
-            else:
-                lines = []
+        lines = self._read_input_lines(paths)
 
         # Filter lines
         matches = []
         for line in lines:
             found = regex.search(line) is not None
-            if (found and not invert) or (not found and invert):
+            if found != invert:
                 matches.append(line)
 
-        result = CommandResult(data=matches, text='\n'.join(matches))
-        self._last_result = result
-        return result
+        return self._make_result(data=matches, text='\n'.join(matches))
 
     def head(self, n: int = 10, *paths: str) -> CommandResult:
         """Display first lines of a file.
@@ -1259,26 +1316,11 @@ class DagShell:
         Returns:
             The first n lines of input.
         """
-        # Get input
-        if paths:
-            lines = []
-            for path in paths:
-                resolved = self._resolve_path(path)
-                content = self.fs.read(resolved)
-                if content:
-                    text = content.decode('utf-8', errors='replace')
-                    lines.extend(text.splitlines())
-        else:
-            if self._last_result:
-                lines = self._last_result.lines()
-            else:
-                lines = []
+        lines = self._read_input_lines(paths)
 
         # Take first n lines
         head_lines = lines[:n]
-        result = CommandResult(data=head_lines, text='\n'.join(head_lines))
-        self._last_result = result
-        return result
+        return self._make_result(data=head_lines, text='\n'.join(head_lines))
 
     def tail(self, n: int = 10, *paths: str) -> CommandResult:
         """Display last lines of a file.
@@ -1298,28 +1340,13 @@ class DagShell:
         Returns:
             The last n lines of input.
         """
-        # Get input
-        if paths:
-            lines = []
-            for path in paths:
-                resolved = self._resolve_path(path)
-                content = self.fs.read(resolved)
-                if content:
-                    text = content.decode('utf-8', errors='replace')
-                    lines.extend(text.splitlines())
-        else:
-            if self._last_result:
-                lines = self._last_result.lines()
-            else:
-                lines = []
+        lines = self._read_input_lines(paths)
 
         # Take last n lines (handle n=0 case explicitly since -0 == 0 in Python)
         tail_lines = lines[-n:] if lines and n > 0 else []
-        result = CommandResult(data=tail_lines, text='\n'.join(tail_lines))
-        self._last_result = result
-        return result
+        return self._make_result(data=tail_lines, text='\n'.join(tail_lines))
 
-    def wc(self, *paths: str, lines: bool = True,
+    def wc(self, *paths: str, lines: bool = False,
            words: bool = False, chars: bool = False) -> CommandResult:
         """Print line, word, and character counts.
 
@@ -1356,37 +1383,30 @@ class DagShell:
             else:
                 text = ''
 
-        # Count
+        # Count - if no flags given, show all three
+        show_all = not lines and not words and not chars
         counts = {}
-        if lines or (not words and not chars):  # Default to lines
+        if lines or show_all:
             # Count lines properly - wc counts non-empty content as at least 1 line
             if text:
                 counts['lines'] = text.count('\n') + (1 if not text.endswith('\n') else 0)
             else:
                 counts['lines'] = 0
-        if words:
+        if words or show_all:
             counts['words'] = len(text.split())
-        if chars:
+        if chars or show_all:
             counts['chars'] = len(text)
 
         # Format output
         if len(counts) == 1:
-            # Single count
             value = list(counts.values())[0]
-            result = CommandResult(data=value, text=str(value))
-        else:
-            # Multiple counts
-            text_parts = []
-            if 'lines' in counts:
-                text_parts.append(str(counts['lines']))
-            if 'words' in counts:
-                text_parts.append(str(counts['words']))
-            if 'chars' in counts:
-                text_parts.append(str(counts['chars']))
-            result = CommandResult(data=counts, text=' '.join(text_parts))
+            return self._make_result(data=value, text=str(value))
 
-        self._last_result = result
-        return result
+        text_parts = []
+        for key in ('lines', 'words', 'chars'):
+            if key in counts:
+                text_parts.append(str(counts[key]))
+        return self._make_result(data=counts, text=' '.join(text_parts))
 
     def sort(self, *paths: str, reverse: bool = False,
              numeric: bool = False, unique: bool = False) -> CommandResult:
@@ -1410,20 +1430,7 @@ class DagShell:
         Returns:
             Sorted lines.
         """
-        # Get input
-        if paths:
-            lines = []
-            for path in paths:
-                resolved = self._resolve_path(path)
-                content = self.fs.read(resolved)
-                if content:
-                    text = content.decode('utf-8', errors='replace')
-                    lines.extend(text.splitlines())
-        else:
-            if self._last_result:
-                lines = self._last_result.lines()
-            else:
-                lines = []
+        lines = self._read_input_lines(paths)
 
         # Sort
         if numeric:
@@ -1447,9 +1454,7 @@ class DagShell:
                     unique_lines.append(line)
             sorted_lines = unique_lines
 
-        result = CommandResult(data=sorted_lines, text='\n'.join(sorted_lines))
-        self._last_result = result
-        return result
+        return self._make_result(data=sorted_lines, text='\n'.join(sorted_lines))
 
     def uniq(self, *paths: str, count: bool = False) -> CommandResult:
         """Report or omit repeated lines.
@@ -1469,20 +1474,7 @@ class DagShell:
         Returns:
             Unique lines.
         """
-        # Get input
-        if paths:
-            lines = []
-            for path in paths:
-                resolved = self._resolve_path(path)
-                content = self.fs.read(resolved)
-                if content:
-                    text = content.decode('utf-8', errors='replace')
-                    lines.extend(text.splitlines())
-        else:
-            if self._last_result:
-                lines = self._last_result.lines()
-            else:
-                lines = []
+        lines = self._read_input_lines(paths)
 
         # Remove consecutive duplicates
         unique_lines = []
@@ -1507,15 +1499,12 @@ class DagShell:
         # Format output
         if count:
             output_lines = [f"{c:7} {line}" for c, line in zip(counts, unique_lines)]
-            result = CommandResult(
+            return self._make_result(
                 data=list(zip(counts, unique_lines)),
                 text='\n'.join(output_lines)
             )
-        else:
-            result = CommandResult(data=unique_lines, text='\n'.join(unique_lines))
 
-        self._last_result = result
-        return result
+        return self._make_result(data=unique_lines, text='\n'.join(unique_lines))
 
     def cut(self, *paths: str, delimiter: str = '\t', fields: str = '1') -> CommandResult:
         """Remove sections from each line.
@@ -1745,8 +1734,6 @@ class DagShell:
             lines1[-1] += '\n'
         if lines2 and not lines2[-1].endswith('\n'):
             lines2[-1] += '\n'
-
-        import difflib
 
         if unified:
             diff_result = list(difflib.unified_diff(
@@ -2012,9 +1999,7 @@ class DagShell:
                     if not name or fnmatch.fnmatch(os.path.basename(start_path), name):
                         found.append(start_path)
 
-        result = CommandResult(data=found, text='\n'.join(found))
-        self._last_result = result
-        return result
+        return self._make_result(data=found, text='\n'.join(found))
 
     def save(self, filename: str = 'dagshell.json') -> CommandResult:
         """Save virtual filesystem to JSON file.
