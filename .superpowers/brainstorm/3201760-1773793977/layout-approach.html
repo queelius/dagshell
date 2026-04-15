@@ -1,0 +1,65 @@
+<h2>Layout: How should the explorable be structured?</h2>
+<p class="subtitle">The terminal is the core. The question is what surrounds it.</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Terminal Only (with inline lessons)</h3>
+      <p>A single full-width terminal. Lessons, philosophy callouts, and filesystem visualization all happen <em>inside</em> the terminal output &mdash; like a real shell tutorial. The filesystem tree is shown via <code>tree</code> command, not a separate panel.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul>
+          <li>Simpler to build</li>
+          <li>Feels most authentic &mdash; like actually using a terminal</li>
+          <li>Works great on mobile</li>
+          <li>Matches the "intro to Linux" framing</li>
+        </ul></div>
+        <div class="cons"><h4>Cons</h4><ul>
+          <li>No persistent visual of the filesystem tree</li>
+          <li>Less "explorable", more "tutorial"</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Terminal + Live Filesystem Tree</h3>
+      <p>Split pane: terminal on the left, a collapsible tree view on the right that updates in real-time as you run commands. The tree shows files, directories, permissions, and sizes. Optional toggle to see the raw JSON/DAG.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul>
+          <li>Visual feedback makes structure <em>visible</em></li>
+          <li>The "aha moment" of seeing the tree grow as you type commands</li>
+          <li>Can highlight which nodes changed</li>
+          <li>More distinctive as an explorable</li>
+        </ul></div>
+        <div class="cons"><h4>Cons</h4><ul>
+          <li>More complex to build</li>
+          <li>Needs responsive design for mobile (collapse to tabs?)</li>
+          <li>Risk of visual clutter</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Terminal + Contextual Sidebar</h3>
+      <p>Terminal is primary. A narrow sidebar appears <em>only when relevant</em> &mdash; showing a filesystem tree during navigation lessons, a permission matrix during chmod lessons, a pipe diagram during composition lessons. Disappears when not needed.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul>
+          <li>Best of both worlds &mdash; visual when it helps, clean when it doesn't</li>
+          <li>Each lesson can have a bespoke visualization</li>
+          <li>Feels like the terminal is "teaching you"</li>
+        </ul></div>
+        <div class="cons"><h4>Cons</h4><ul>
+          <li>Most complex to build</li>
+          <li>Need to design multiple visualization types</li>
+          <li>Transitions between sidebar states need to feel natural</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+</div>

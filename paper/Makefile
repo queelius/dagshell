@@ -25,3 +25,14 @@ help:
 	@echo "  clean  - Remove generated files"
 	@echo "  view   - Open the PDF in default viewer"
 	@echo "  help   - Show this help message"
+
+# --- HTML via tex2html ---
+HTMLDIR = html_paper
+
+.PHONY: html
+
+html: $(HTMLDIR)/index.html
+
+$(HTMLDIR)/index.html: dagshell.tex
+	@mkdir -p $(HTMLDIR)
+	tex2html dagshell.tex -o $(HTMLDIR)
